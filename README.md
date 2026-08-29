@@ -65,7 +65,8 @@ The script creates a local `.venv`, installs Briefcase 0.4.4, and starts the app
 ./build-macos.sh
 ```
 
-This builds the macOS application with Briefcase and packages it with an ad-hoc signature. The resulting artifact will be under `dist/`.
+This builds the macOS application with Briefcase, ad-hoc signs the application bundle,
+and places it inside an unsigned DMG under `dist/`.
 
 The packaged app includes its own Python runtime and Python dependencies, so the
 Mac running it does not need Python, Netmiko, or any other package installed.
@@ -78,9 +79,10 @@ Pull requests and pushes to `main` run the test suite on macOS. Pushing a semant
 version tag such as `v0.1.0` builds a universal macOS DMG and publishes it to a GitHub
 Release.
 
-The workflow currently uses ad-hoc signing because no Apple Developer credentials are
-stored in the repository. Before distributing broadly, configure Developer ID signing
-and notarization in GitHub Actions so Gatekeeper accepts the downloaded application.
+The workflow currently ad-hoc signs the application bundle because no Apple Developer
+credentials are stored in the repository. The outer DMG is left unsigned. Before
+distributing broadly, configure Developer ID signing and notarization in GitHub Actions
+so Gatekeeper accepts the downloaded application.
 
 Source and releases: <https://github.com/HAGerox/switch-backup>
 
