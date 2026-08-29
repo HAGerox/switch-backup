@@ -14,9 +14,10 @@ briefcase build macOS app
 briefcase package macOS app -p dmg --adhoc-sign
 
 app_path=$(find build/switchbackup/macos/app -maxdepth 1 -name '*.app' -print -quit)
-built_dmg=$(find dist -maxdepth 1 -name '*.dmg' -print -quit)
+project_version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["tool"]["briefcase"]["version"])')
+built_dmg="dist/Switch Backup-${project_version}.dmg"
 test -n "$app_path"
-test -n "$built_dmg"
+test -f "$built_dmg"
 unsigned_dmg="${built_dmg%.dmg}-unsigned.dmg"
 ./scripts/package-macos-dmg.sh "$app_path" "$unsigned_dmg"
 mv "$unsigned_dmg" "$built_dmg"
