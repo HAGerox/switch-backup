@@ -1,4 +1,4 @@
-name: CI
+name: Switch Backup CI
 
 on:
   pull_request:

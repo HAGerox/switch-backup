@@ -2,6 +2,8 @@
 
 A deliberately small macOS utility for backing up Cisco switch running configurations.
 
+[Download the latest release](https://github.com/HAGerox/switch-backup/releases/latest)
+
 ## What it does
 
 - Two simple tabs: **Credentials** and **Switches**.
@@ -79,6 +81,8 @@ DMG, creates a SHA-256 checksum, and publishes both files to a GitHub Release.
 The workflow currently uses ad-hoc signing because no Apple Developer credentials are
 stored in the repository. Before distributing broadly, configure Developer ID signing
 and notarization in GitHub Actions so Gatekeeper accepts the downloaded application.
+
+Source and releases: <https://github.com/HAGerox/switch-backup>
 
 ## Project layout
 

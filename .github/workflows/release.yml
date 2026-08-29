@@ -1,4 +1,4 @@
-name: Release macOS DMG
+name: Release Switch Backup for macOS
 
 on:
   push:

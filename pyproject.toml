@@ -2,11 +2,11 @@
 project_name = "Switch Backup"
 bundle = "com.switchbackup"
 version = "0.1.0"
-url = "https://example.invalid/switch-backup"
+url = "https://github.com/HAGerox/switch-backup"
 license = "MIT"
 license-files = ["LICENSE"]
-author = "Switch Backup"
-author_email = "noreply@example.invalid"
+author = "Finn Stanley"
+author_email = "73347504+HAGerox@users.noreply.github.com"
 
 [tool.briefcase.app.switchbackup]
 formal_name = "Switch Backup"
