@@ -13,11 +13,15 @@ briefcase create macOS app
 briefcase build macOS app
 briefcase package macOS app -p dmg --adhoc-sign
 
+app_path=$(find build/switchbackup/macos/app -maxdepth 1 -name '*.app' -print -quit)
 built_dmg=$(find dist -maxdepth 1 -name '*.dmg' -print -quit)
+test -n "$app_path"
 test -n "$built_dmg"
 unsigned_dmg="${built_dmg%.dmg}-unsigned.dmg"
-hdiutil convert "$built_dmg" -format UDZO -o "$unsigned_dmg"
+./scripts/package-macos-dmg.sh "$app_path" "$unsigned_dmg"
 mv "$unsigned_dmg" "$built_dmg"
+hdiutil verify "$built_dmg"
+codesign --verify --deep --strict "$app_path"
 if codesign --verify "$built_dmg" >/dev/null 2>&1; then
   echo "The DMG is unexpectedly signed."
   exit 1

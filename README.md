@@ -80,9 +80,10 @@ version tag such as `v0.1.0` builds a universal macOS DMG and publishes it to a 
 Release.
 
 The workflow currently ad-hoc signs the application bundle because no Apple Developer
-credentials are stored in the repository. The outer DMG is left unsigned. Before
-distributing broadly, configure Developer ID signing and notarization in GitHub Actions
-so Gatekeeper accepts the downloaded application.
+credentials are stored in the repository. As with Stem Separator, the outer DMG is
+created separately and left unsigned. Before distributing broadly, configure Developer
+ID signing and notarization in GitHub Actions so Gatekeeper accepts the downloaded
+application.
 
 Source and releases: <https://github.com/HAGerox/switch-backup>
 

@@ -37,29 +37,28 @@ jobs:
       - name: Build macOS app
         run: briefcase build macOS app --no-input --log
 
-      - name: Package DMG
+      - name: Ad-hoc sign the app bundle
         run: briefcase package macOS app -p dmg --adhoc-sign --no-input --log
 
-      - name: Prepare release artifacts
+      - name: Create unsigned DMG
         run: |
-          built_dmg=$(find dist -maxdepth 1 -name '*.dmg' -print -quit)
-          test -n "$built_dmg"
-          unsigned_dmg="${built_dmg%.dmg}-unsigned.dmg"
-          hdiutil convert "$built_dmg" -format UDZO -o "$unsigned_dmg"
-          mv "$unsigned_dmg" "$built_dmg"
-          if codesign --verify "$built_dmg" >/dev/null 2>&1; then
+          app_path=$(find build/switchbackup/macos/app -maxdepth 1 -name '*.app' -print -quit)
+          test -n "$app_path"
+          release_dmg="dist/Switch-Backup-${GITHUB_REF_NAME#v}.dmg"
+          ./scripts/package-macos-dmg.sh "$app_path" "$release_dmg"
+          hdiutil verify "$release_dmg"
+          codesign --verify --deep --strict "$app_path"
+          if codesign --verify "$release_dmg" >/dev/null 2>&1; then
             echo "The DMG is unexpectedly signed."
             exit 1
           fi
-          release_dmg="Switch-Backup-${GITHUB_REF_NAME#v}.dmg"
-          mv "$built_dmg" "dist/$release_dmg"
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            dist/*.dmg \
+            "dist/Switch-Backup-${GITHUB_REF_NAME#v}.dmg" \
             --verify-tag \
             --generate-notes
 
