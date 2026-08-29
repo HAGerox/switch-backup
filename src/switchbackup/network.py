@@ -27,7 +27,7 @@ def prepare_networking() -> None:
 
 
 class CiscoBackupClient:
-    """Cisco-focused discovery and running-config retrieval using Netmiko."""
+    """Cisco-focused discovery and startup-config retrieval using Netmiko."""
 
     def __init__(self, db: Database):
         self.db = db
@@ -159,13 +159,8 @@ class CiscoBackupClient:
             with _CONNECT_HANDLER(**device) as connection:
                 prompt = connection.find_prompt()
                 discovered_name = self._hostname(connection, prompt)
-                command = (
-                    "show running-config detailed"
-                    if device_type == "cisco_s300"
-                    else "show running-config"
-                )
                 config = connection.send_command(
-                    command,
+                    "show startup-config",
                     read_timeout=120,
                     strip_prompt=True,
                     strip_command=True,
@@ -334,8 +329,16 @@ class CiscoBackupClient:
     def _config_problem(config: str) -> str:
         text = (config or "").strip()
         if len(text) < 20:
-            return "Running configuration was empty or unexpectedly short"
+            return "Startup configuration was empty or unexpectedly short"
         lowered = text.lower()
+        missing_config_markers = (
+            "non-volatile configuration memory is not present",
+            "startup configuration is not present",
+            "startup-config is not present",
+            "startup configuration file does not exist",
+        )
+        if any(marker in lowered for marker in missing_config_markers):
+            return "Startup configuration is not present on the device"
         known_errors = (
             "% authorization failed",
             "command authorization failed",
@@ -346,9 +349,9 @@ class CiscoBackupClient:
         )
         for marker in known_errors:
             if marker in lowered:
-                return f"Device rejected 'show running-config' ({marker.strip('% ')})"
+                return f"Device rejected 'show startup-config' ({marker.strip('% ')})"
         if "--more--" in lowered or ("<space>" in lowered and "quit" in lowered):
-            return "Running configuration was paginated and therefore incomplete"
+            return "Startup configuration was paginated and therefore incomplete"
         return ""
 
     @staticmethod

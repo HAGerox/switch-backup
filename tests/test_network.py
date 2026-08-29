@@ -40,7 +40,7 @@ class FakeDiscoveryConnection(FakeConnection):
         raise AssertionError(f"Unexpected command: {command}")
 
 
-def test_backup_connection_only_fetches_running_config(monkeypatch):
+def test_backup_connection_only_fetches_startup_config(monkeypatch):
     connection = FakeConnection()
 
     def connect_handler(**device):
@@ -60,7 +60,7 @@ def test_backup_connection_only_fetches_running_config(monkeypatch):
     assert result.config.startswith("hostname SW-201")
     assert connection.commands == [
         (
-            "show running-config",
+            "show startup-config",
             {
                 "read_timeout": 120,
                 "strip_prompt": True,
@@ -119,12 +119,17 @@ def test_catalyst_1300_model_overrides_bad_cached_driver():
     assert CiscoBackupClient._device_type_for_switch(switch) == "cisco_s300"
 
 
-def test_paginated_running_config_is_rejected():
+def test_paginated_startup_config_is_rejected():
     config = "config-file-header\ninterface gi1\n--More-- or (q)uit"
     assert "incomplete" in CiscoBackupClient._config_problem(config)
 
 
-def test_small_business_backup_requests_detailed_config(monkeypatch):
+def test_missing_startup_config_is_rejected():
+    config = "% Non-volatile configuration memory is not present"
+    assert "not present" in CiscoBackupClient._config_problem(config)
+
+
+def test_small_business_backup_requests_startup_config(monkeypatch):
     connection = FakeConnection()
     monkeypatch.setattr(network_module, "_CONNECT_HANDLER", lambda **device: connection)
 
@@ -136,4 +141,4 @@ def test_small_business_backup_requests_detailed_config(monkeypatch):
     )
 
     assert result.ok
-    assert connection.commands[0][0] == "show running-config detailed"
+    assert connection.commands[0][0] == "show startup-config"

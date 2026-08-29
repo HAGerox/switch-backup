@@ -11,7 +11,7 @@ author_email = "73347504+HAGerox@users.noreply.github.com"
 [tool.briefcase.app.switchbackup]
 formal_name = "Switch Backup"
 description = "Minimal Cisco switch configuration backup utility"
-long_description = """A small macOS utility for backing up Cisco switch running configurations to a ZIP file."""
+long_description = """A small macOS utility for backing up Cisco switch startup configurations to a ZIP file."""
 icon = "resources/icon"
 sources = ["src/switchbackup"]
 test_sources = ["tests"]

@@ -2,7 +2,7 @@
 
 Switch Backup is a simple macOS app for saving Cisco switch configurations.
 Add your login details and switches, start a backup, and the app creates a ZIP
-file in your Downloads folder containing the running configuration from each
+file in your Downloads folder containing the startup configuration from each
 switch.
 
 Everything runs directly from your Mac. Switch details stay on your computer,
@@ -42,7 +42,7 @@ it.
 
 - Passwords are stored in macOS Keychain rather than in the app's database.
 - The app connects directly from your Mac to your switches over SSH.
-- Backups only read the running configuration. The app does not enter
+- Backups only read the startup configuration. The app does not enter
   configuration mode, save changes, or send configuration commands.
 - Backup ZIP files contain plain text configurations and are not encrypted, so
   store and share them carefully.
