@@ -357,7 +357,6 @@ class SwitchBackupApp(toga.App):
         initial_name = site.name if site is not None and mode == "rename" else ""
         self.new_site_name = toga.TextInput(
             value=initial_name,
-            placeholder="For example: London Office",
             on_change=self._site_form_changed,
         )
         self.site_error_label = toga.Label(
