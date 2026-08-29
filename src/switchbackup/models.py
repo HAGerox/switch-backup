@@ -42,3 +42,14 @@ class BackupResult:
     device_type: str = ""
     credential_id: int | None = None
     message: str = ""
+
+
+@dataclass(slots=True)
+class SaveResult:
+    switch_id: int
+    ip: str
+    ok: bool
+    discovered_name: str = ""
+    device_type: str = ""
+    credential_id: int | None = None
+    message: str = ""

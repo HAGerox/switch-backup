@@ -5,9 +5,16 @@ import sqlite3
 from pathlib import Path
 
 import toga
+from rubicon.objc import at
 from toga.sources import AccessorColumn, ListSource
 from toga.style import Pack
 from toga.style.pack import CENTER, COLUMN, ROW
+from toga_cocoa.libs import (
+    NSBezelStyle,
+    NSImage,
+    NSImageScaleProportionallyDown,
+)
+from toga_cocoa.widgets.button import Button as CocoaButton
 
 from .backup import BackupManager
 from .ip_utils import parse_ip_range, parse_single_ip
@@ -31,11 +38,36 @@ class SwitchTable(toga.Table):
             self._on_cell_edit(row=row, accessor=accessor, value=value)
 
 
+class NativeListActionButtonImpl(CocoaButton):
+    """Small AppKit list action button without changing the table widget."""
+
+    def create(self):
+        super().create()
+        self.native.bordered = False
+        self.native.image = NSImage.imageNamed(at(self.interface.image_name))
+        self.native.imageScaling = NSImageScaleProportionallyDown
+        self.native.toolTip = self.interface.help_text
+        self.native.setAccessibilityLabel_(self.interface.help_text)
+
+    def _set_button_style(self):
+        self.native.bezelStyle = NSBezelStyle.ShadowlessSquare
+
+
+class NativeListActionButton(toga.Button):
+    def __init__(self, image_name: str, help_text: str, **kwargs):
+        self.image_name = image_name
+        self.help_text = help_text
+        super().__init__("", **kwargs)
+
+    def _create(self):
+        return NativeListActionButtonImpl(interface=self)
+
+
 class SwitchBackupApp(toga.App):
     def startup(self):
         prepare_networking()
         self.db = Database()
-        self.backup_manager = BackupManager(self.db, max_workers=3)
+        self.backup_manager = BackupManager(self.db)
         self.status_by_ip: dict[str, str] = {}
         self.credential_popup: toga.Window | None = None
         self.switch_popup: toga.Window | None = None
@@ -74,27 +106,29 @@ class SwitchBackupApp(toga.App):
             style=Pack(flex=1),
         )
 
-        add_button = toga.Button(
-            "Add Credential", on_press=self._show_credential_popup
+        self.add_credential_button = self._list_action_button(
+            "NSAddTemplate", "Add credential", self._show_credential_popup
         )
-        self.remove_credential_button = toga.Button(
-            "Remove Credential",
-            on_press=self._remove_credential,
+        self.remove_credential_button = self._list_action_button(
+            "NSRemoveTemplate",
+            "Remove selected credential",
+            self._remove_credential,
             enabled=False,
         )
-
-        buttons = toga.Box(
-            children=[
-                toga.Box(style=Pack(flex=1)),
-                add_button,
-                self.remove_credential_button,
-            ],
-            style=Pack(direction=ROW, gap=8),
+        actions = self._list_action_controls(
+            self.add_credential_button,
+            self.remove_credential_button,
         )
 
         return toga.Box(
-            children=[self.credential_table, buttons],
-            style=Pack(direction=COLUMN, margin=12, gap=10),
+            children=[
+                self.credential_table,
+                toga.Box(
+                    children=[actions, toga.Box(style=Pack(flex=1))],
+                    style=Pack(direction=ROW, align_items=CENTER, height=28),
+                ),
+            ],
+            style=Pack(direction=COLUMN, margin=12, gap=0),
         )
 
     def _refresh_credentials(self):
@@ -105,7 +139,9 @@ class SwitchBackupApp(toga.App):
         self.remove_credential_button.enabled = False
 
     def _credential_selection_changed(self, widget, **kwargs):
-        self.remove_credential_button.enabled = self.credential_table.selection is not None
+        self.remove_credential_button.enabled = (
+            self.credential_table.selection is not None
+        )
 
     def _show_credential_popup(self, widget, **kwargs):
         if self.credential_popup and not self.credential_popup.closed:
@@ -213,11 +249,17 @@ class SwitchBackupApp(toga.App):
             style=Pack(flex=1),
         )
 
-        self.add_switch_button = toga.Button(
-            "Add Switches", on_press=self._show_switch_popup
+        self.add_switch_button = self._list_action_button(
+            "NSAddTemplate", "Add switches", self._show_switch_popup
         )
-        self.remove_switch_button = toga.Button(
-            "Remove Switches", on_press=self._remove_switches, enabled=False
+        self.remove_switch_button = self._list_action_button(
+            "NSRemoveTemplate",
+            "Remove selected switches",
+            self._remove_switches,
+            enabled=False,
+        )
+        self.save_selected_button = toga.Button(
+            "Save to Startup", on_press=self._save_selected, enabled=False
         )
         self.backup_selected_button = toga.Button(
             "Back Up Selected", on_press=self._backup_selected, enabled=False
@@ -243,12 +285,15 @@ class SwitchBackupApp(toga.App):
 
         self.switch_actions = toga.Box(
             children=[
+                self._list_action_controls(
+                    self.add_switch_button,
+                    self.remove_switch_button,
+                ),
                 toga.Box(style=Pack(flex=1)),
-                self.add_switch_button,
-                self.remove_switch_button,
+                self.save_selected_button,
                 self.backup_selected_button,
             ],
-            style=Pack(direction=ROW, gap=8),
+            style=Pack(direction=ROW, align_items=CENTER, gap=8, height=28),
         )
         self.switch_footer = toga.Box(
             children=[self.switch_actions],
@@ -257,7 +302,7 @@ class SwitchBackupApp(toga.App):
 
         return toga.Box(
             children=[self.switch_table, self.switch_footer],
-            style=Pack(direction=COLUMN, margin=12, gap=10),
+            style=Pack(direction=COLUMN, margin=12, gap=0),
         )
 
     def _refresh_switches(self):
@@ -277,11 +322,13 @@ class SwitchBackupApp(toga.App):
             data=rows,
         )
         self.remove_switch_button.enabled = False
+        self.save_selected_button.enabled = False
         self.backup_selected_button.enabled = False
 
     def _switch_selection_changed(self, widget, **kwargs):
         has_selection = bool(self.switch_table.selection)
         self.remove_switch_button.enabled = has_selection
+        self.save_selected_button.enabled = has_selection
         self.backup_selected_button.enabled = has_selection
 
     def _show_switch_popup(self, widget, **kwargs):
@@ -449,6 +496,23 @@ class SwitchBackupApp(toga.App):
             return
         await self._run_backup(switches)
 
+    async def _save_selected(self, widget, **kwargs):
+        switches = self._selected_switches()
+        if not switches:
+            return
+
+        count = len(switches)
+        confirmed = await self.main_window.dialog(
+            toga.ConfirmDialog(
+                "Save running configurations?",
+                "Replace the startup configuration on "
+                f"{count} selected switch{'es' if count != 1 else ''} "
+                "with the current running configuration?",
+            )
+        )
+        if confirmed:
+            await self._run_save(switches)
+
     async def _discover_switches(self, ips: list[str]):
         if not ips:
             return
@@ -524,6 +588,7 @@ class SwitchBackupApp(toga.App):
             ]
 
         self.remove_switch_button.enabled = False
+        self.save_selected_button.enabled = False
         self.backup_selected_button.enabled = False
         for switch in switches:
             self.status_by_ip[switch.ip] = "Backing up…"
@@ -573,9 +638,102 @@ class SwitchBackupApp(toga.App):
         else:
             await self._error("No switches were backed up successfully.")
 
+    async def _run_save(self, switches):
+        credentials = self.db.list_credentials()
+        if not credentials:
+            await self._error("Add a credential before saving switch configurations.")
+            return
+
+        undiscovered = [
+            switch for switch in switches if self._switch_needs_discovery(switch)
+        ]
+        if undiscovered:
+            await self._discover_switches([switch.ip for switch in undiscovered])
+            selected_ids = {switch.id for switch in switches}
+            switches = [
+                switch
+                for switch in self.db.list_switches()
+                if switch.id in selected_ids
+            ]
+
+        for switch in switches:
+            self.status_by_ip[switch.ip] = "Saving…"
+        self._refresh_switches()
+        self._begin_progress("Saving", len(switches))
+        self._set_network_buttons_enabled(False)
+        loop = asyncio.get_running_loop()
+
+        def on_progress(done, total, result):
+            loop.call_soon_threadsafe(self._apply_save_progress, done, total, result)
+
+        try:
+            results = await asyncio.to_thread(
+                self.backup_manager.save_running,
+                switches,
+                credentials,
+                on_progress,
+            )
+        except Exception as exc:
+            self.backup_progress.stop()
+            self._hide_progress()
+            await self._error(str(exc))
+            return
+        finally:
+            self._set_network_buttons_enabled(True)
+
+        for result in results:
+            self.status_by_ip[result.ip] = (
+                "Saved to startup" if result.ok else f"Save failed: {result.message}"
+            )
+        self._refresh_switches()
+        self._finish_progress("Save complete", len(results), len(switches))
+
+        succeeded = sum(1 for result in results if result.ok)
+        failed = len(results) - succeeded
+        if succeeded:
+            message = (
+                f"Saved the running configuration to startup on {succeeded} "
+                f"switch{'es' if succeeded != 1 else ''}."
+            )
+            if failed:
+                message += f" {failed} error{'s' if failed != 1 else ''}."
+            await self.main_window.dialog(toga.InfoDialog("Save complete", message))
+        else:
+            await self._error("No running configurations were saved successfully.")
+
     # ------------------------------------------------------------------
     # Shared UI helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _list_action_button(
+        image_name: str,
+        help_text: str,
+        on_press,
+        *,
+        enabled: bool = True,
+    ):
+        return NativeListActionButton(
+            image_name,
+            help_text,
+            on_press=on_press,
+            enabled=enabled,
+            style=Pack(width=28, height=24),
+        )
+
+    @staticmethod
+    def _list_action_controls(add_button, remove_button):
+        return toga.Box(
+            children=[
+                add_button,
+                toga.Divider(
+                    direction=toga.Divider.VERTICAL,
+                    style=Pack(height=18),
+                ),
+                remove_button,
+            ],
+            style=Pack(direction=ROW, align_items=CENTER, gap=0),
+        )
+
     def _field(self, label: str, widget):
         label_widget = toga.Label(label, style=Pack(width=120))
         widget.style.flex = 1
@@ -599,6 +757,7 @@ class SwitchBackupApp(toga.App):
         self.add_switch_button.enabled = enabled
         if not enabled:
             self.remove_switch_button.enabled = False
+            self.save_selected_button.enabled = False
             self.backup_selected_button.enabled = False
 
     @staticmethod
@@ -644,6 +803,14 @@ class SwitchBackupApp(toga.App):
         self.progress_label.text = "Backing up"
         self.status_by_ip[result.ip] = (
             "Backed up" if result.ok else f"Failed: {result.message}"
+        )
+        self._refresh_switches()
+
+    def _apply_save_progress(self, done, total, result):
+        self.backup_progress.value = done
+        self.progress_label.text = "Saving"
+        self.status_by_ip[result.ip] = (
+            "Saved to startup" if result.ok else f"Save failed: {result.message}"
         )
         self._refresh_switches()
 

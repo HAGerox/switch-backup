@@ -31,6 +31,10 @@ class FakeConnection:
         self.commands.append((command, kwargs))
         return "hostname SW-201\ninterface GigabitEthernet1/0/1\n"
 
+    def save_config(self):
+        self.commands.append(("save_config", {}))
+        return "Building configuration...\n[OK]"
+
 
 class FakeDiscoveryConnection(FakeConnection):
     def send_command_timing(self, command, **kwargs):
@@ -142,3 +146,35 @@ def test_small_business_backup_requests_startup_config(monkeypatch):
 
     assert result.ok
     assert connection.commands[0][0] == "show startup-config"
+
+
+def test_save_uses_netmiko_driver_save_config(monkeypatch):
+    connection = FakeConnection()
+    monkeypatch.setattr(network_module, "_CONNECT_HANDLER", lambda **device: connection)
+
+    client = CiscoBackupClient(FakeDatabase())
+    result = client._connect_and_save(
+        Switch(3, "10.0.0.201"),
+        Credential(7, "Main", "admin"),
+        "cisco_ios",
+    )
+
+    assert result.ok
+    assert result.message == "Saved to startup config"
+    assert connection.commands == [("save_config", {})]
+
+
+def test_save_rejected_by_device_is_reported(monkeypatch):
+    connection = FakeConnection()
+    connection.save_config = lambda: "% Authorization failed"
+    monkeypatch.setattr(network_module, "_CONNECT_HANDLER", lambda **device: connection)
+
+    client = CiscoBackupClient(FakeDatabase())
+    result = client._connect_and_save(
+        Switch(3, "10.0.0.201"),
+        Credential(7, "Main", "admin"),
+        "cisco_ios",
+    )
+
+    assert not result.ok
+    assert "rejected" in result.message

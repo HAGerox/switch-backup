@@ -7,7 +7,7 @@ from typing import Callable
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from .filenames import backup_filename
-from .models import BackupResult, Credential, DiscoveryResult, Switch
+from .models import BackupResult, Credential, DiscoveryResult, SaveResult, Switch
 from .network import CiscoBackupClient
 from .storage import Database
 
@@ -122,6 +122,49 @@ class BackupManager:
                         result.device_type,
                         result.discovered_name,
                         result.model,
+                    )
+                if on_progress:
+                    on_progress(len(results), len(switches), result)
+
+        results.sort(key=lambda result: tuple(int(x) for x in result.ip.split(".")))
+        return results
+
+    def save_running(
+        self,
+        switches: list[Switch],
+        credentials: list[Credential],
+        on_progress: Callable[[int, int, SaveResult], None] | None = None,
+    ) -> list[SaveResult]:
+        if not switches:
+            return []
+        if not credentials:
+            raise ValueError("Add at least one credential first.")
+
+        workers = min(self.max_workers, len(switches))
+        results: list[SaveResult] = []
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futures = {
+                pool.submit(self.client.save_one, switch, credentials): switch
+                for switch in switches
+            }
+            for future in as_completed(futures):
+                switch = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = SaveResult(
+                        switch_id=switch.id,
+                        ip=switch.ip,
+                        ok=False,
+                        message=f"Unexpected error: {exc}",
+                    )
+                results.append(result)
+                if result.ok and result.credential_id is not None:
+                    self.db.update_switch_discovery(
+                        result.switch_id,
+                        result.credential_id,
+                        result.device_type,
+                        result.discovered_name,
                     )
                 if on_progress:
                     on_progress(len(results), len(switches), result)

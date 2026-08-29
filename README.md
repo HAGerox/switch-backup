@@ -18,6 +18,7 @@ to an online service.
 - Save multiple sets of login details
 - Remember which login worked for each switch
 - Back up several switches at once with clear progress and results
+- Save selected running configurations to startup configuration
 - Create one easy-to-store ZIP file for every backup
 - Keep individual configurations as clearly named text files
 
@@ -42,8 +43,9 @@ it.
 
 - Passwords are stored in macOS Keychain rather than in the app's database.
 - The app connects directly from your Mac to your switches over SSH.
-- Backups only read the startup configuration. The app does not enter
-  configuration mode, save changes, or send configuration commands.
+- Backups only read the startup configuration. The separate **Save to Startup**
+  action asks for confirmation before using the switch driver's configuration-save
+  operation to replace startup configuration with the current running configuration.
 - Backup ZIP files contain plain text configurations and are not encrypted, so
   store and share them carefully.
 
@@ -54,7 +56,7 @@ Cisco switches reached over SSH on port 22 using IPv4 and a username and
 password.
 
 Telnet, IPv6, SSH keys, scheduled backups, configuration history, comparisons,
-and configuration changes are not currently supported.
+and configuration editing are not currently supported.
 
 ## For developers
 

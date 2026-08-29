@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import socket
 
-from .models import BackupResult, Credential, DiscoveryResult, Switch
+from .models import BackupResult, Credential, DiscoveryResult, SaveResult, Switch
 from .storage import Database
 
 CISCO_PROBE_DRIVERS = (
@@ -139,6 +139,56 @@ class CiscoBackupClient:
             message=message,
         )
 
+    def save_one(self, switch: Switch, credentials: list[Credential]) -> SaveResult:
+        """Save the running configuration using the connected Netmiko driver."""
+        if not self._tcp_open(switch.ip, 22):
+            return SaveResult(
+                switch_id=switch.id,
+                ip=switch.ip,
+                ok=False,
+                message="SSH (TCP/22) not reachable",
+            )
+
+        ordered = self._ordered_credentials(switch, credentials)
+        if not ordered:
+            return SaveResult(
+                switch_id=switch.id,
+                ip=switch.ip,
+                ok=False,
+                message="No credentials configured",
+            )
+
+        errors: list[str] = []
+        known_device_type = self._device_type_for_switch(switch)
+        if known_device_type:
+            for credential in ordered:
+                result = self._connect_and_save(
+                    switch, credential, known_device_type
+                )
+                if result.ok:
+                    return result
+                errors.append(f"{credential.name}: {result.message}")
+
+        for credential in ordered:
+            password = self.db.get_credential_password(credential.id)
+            if not password:
+                errors.append(f"{credential.name}: password missing from Keychain")
+                continue
+
+            for driver in CISCO_PROBE_DRIVERS:
+                result = self._connect_and_save(switch, credential, driver)
+                if result.ok:
+                    return result
+                errors.append(f"{credential.name}/{driver}: {result.message}")
+
+        message = "; ".join(errors[-4:]) or "Unable to authenticate or identify switch"
+        return SaveResult(
+            switch_id=switch.id,
+            ip=switch.ip,
+            ok=False,
+            message=message,
+        )
+
     def _connect_and_fetch(
         self, switch: Switch, credential: Credential, device_type: str
     ) -> BackupResult:
@@ -187,6 +237,54 @@ class CiscoBackupClient:
             )
         except Exception as exc:
             return BackupResult(
+                switch_id=switch.id,
+                ip=switch.ip,
+                ok=False,
+                message=self._friendly_error(exc),
+            )
+
+    def _connect_and_save(
+        self, switch: Switch, credential: Credential, device_type: str
+    ) -> SaveResult:
+        prepare_networking()
+        password = self.db.get_credential_password(credential.id)
+        if not password:
+            return SaveResult(
+                switch_id=switch.id,
+                ip=switch.ip,
+                ok=False,
+                message="Password missing from Keychain",
+            )
+
+        device = self._base_device(switch.ip, credential.username, password)
+        device["device_type"] = device_type
+
+        try:
+            with _CONNECT_HANDLER(**device) as connection:
+                prompt = connection.find_prompt()
+                discovered_name = self._hostname(connection, prompt)
+                output = connection.save_config()
+
+            problem = self._save_problem(output)
+            if problem:
+                return SaveResult(
+                    switch_id=switch.id,
+                    ip=switch.ip,
+                    ok=False,
+                    message=problem,
+                )
+
+            return SaveResult(
+                switch_id=switch.id,
+                ip=switch.ip,
+                ok=True,
+                discovered_name=discovered_name,
+                device_type=device_type,
+                credential_id=credential.id,
+                message="Saved to startup config",
+            )
+        except Exception as exc:
+            return SaveResult(
                 switch_id=switch.id,
                 ip=switch.ip,
                 ok=False,
@@ -352,6 +450,23 @@ class CiscoBackupClient:
                 return f"Device rejected 'show startup-config' ({marker.strip('% ')})"
         if "--more--" in lowered or ("<space>" in lowered and "quit" in lowered):
             return "Startup configuration was paginated and therefore incomplete"
+        return ""
+
+    @staticmethod
+    def _save_problem(output: str) -> str:
+        lowered = ANSI_ESCAPE_RE.sub("", output or "").lower()
+        known_errors = (
+            "% authorization failed",
+            "command authorization failed",
+            "% invalid input detected",
+            "% incomplete command",
+            "% ambiguous command",
+            "permission denied",
+            "not authorized",
+        )
+        for marker in known_errors:
+            if marker in lowered:
+                return f"Device rejected configuration save ({marker.strip('% ')})"
         return ""
 
     @staticmethod
