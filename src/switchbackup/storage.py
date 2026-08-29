@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import platform
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from collections.abc import Iterator
 from pathlib import Path
 
-from .models import Credential, Switch
+from .models import Credential, Site, Switch
 
 APP_NAME = "Switch Backup"
 KEYRING_SERVICE = "Switch Backup"
+DEFAULT_SITE_NAME = "Default Site"
 
 
 def default_data_dir() -> Path:
@@ -49,7 +50,26 @@ class Database:
         self.path = path or (default_data_dir() / "switch-backup.sqlite3")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.secrets = secrets or KeychainStore()
+        self._backup_legacy_database()
         self._init_schema()
+
+    def _backup_legacy_database(self) -> None:
+        if not self.path.exists():
+            return
+        with closing(sqlite3.connect(self.path)) as source:
+            columns = {
+                row[1]
+                for row in source.execute("PRAGMA table_info(credentials)").fetchall()
+            }
+            if not columns or "site_id" in columns:
+                return
+            backup_path = self.path.with_name(
+                f"{self.path.stem}.pre-sites{self.path.suffix}"
+            )
+            if backup_path.exists():
+                return
+            with closing(sqlite3.connect(backup_path)) as destination:
+                source.backup(destination)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -64,44 +84,182 @@ class Database:
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS credentials (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    username TEXT NOT NULL
-                );
+            conn.execute("PRAGMA foreign_keys = OFF")
+            tables = {
+                row["name"]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if "credentials" not in tables or "switches" not in tables:
+                self._create_site_schema(conn)
+                self._ensure_default_site(conn)
+                return
 
-                CREATE TABLE IF NOT EXISTS switches (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ip TEXT NOT NULL UNIQUE,
-                    name TEXT NOT NULL DEFAULT '',
-                    last_credential_id INTEGER NULL,
-                    last_device_type TEXT NULL,
-                    model TEXT NOT NULL DEFAULT '',
-                    FOREIGN KEY(last_credential_id) REFERENCES credentials(id) ON DELETE SET NULL
-                );
-                """
-            )
-            columns = {
+            credential_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(credentials)").fetchall()
+            }
+            switch_columns = {
                 row["name"]
                 for row in conn.execute("PRAGMA table_info(switches)").fetchall()
             }
-            if "model" not in columns:
-                conn.execute(
-                    "ALTER TABLE switches ADD COLUMN model TEXT NOT NULL DEFAULT ''"
-                )
+            if "site_id" not in credential_columns or "site_id" not in switch_columns:
+                self._migrate_to_sites(conn, switch_columns)
+            else:
+                self._create_site_schema(conn)
+                self._ensure_default_site(conn)
+                if "model" not in switch_columns:
+                    conn.execute(
+                        "ALTER TABLE switches ADD COLUMN model TEXT NOT NULL DEFAULT ''"
+                    )
+
+    @staticmethod
+    def _create_site_schema(conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS sites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE
+            );
+
+            CREATE TABLE IF NOT EXISTS credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                site_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                username TEXT NOT NULL,
+                FOREIGN KEY(site_id) REFERENCES sites(id) ON DELETE CASCADE,
+                UNIQUE(site_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS switches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                site_id INTEGER NOT NULL,
+                ip TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                last_credential_id INTEGER NULL,
+                last_device_type TEXT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(site_id) REFERENCES sites(id) ON DELETE CASCADE,
+                FOREIGN KEY(last_credential_id) REFERENCES credentials(id) ON DELETE SET NULL,
+                UNIQUE(site_id, ip)
+            );
+            """
+        )
+
+    @staticmethod
+    def _ensure_default_site(conn: sqlite3.Connection) -> int:
+        row = conn.execute("SELECT id FROM sites ORDER BY id LIMIT 1").fetchone()
+        if row:
+            return int(row["id"])
+        cursor = conn.execute(
+            "INSERT INTO sites(name) VALUES(?)",
+            (DEFAULT_SITE_NAME,),
+        )
+        return int(cursor.lastrowid)
+
+    def _migrate_to_sites(
+        self,
+        conn: sqlite3.Connection,
+        switch_columns: set[str],
+    ) -> None:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sites ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)"
+        )
+        default_site_id = self._ensure_default_site(conn)
+
+        conn.execute("ALTER TABLE switches RENAME TO switches_legacy")
+        conn.execute("ALTER TABLE credentials RENAME TO credentials_legacy")
+        self._create_site_schema(conn)
+
+        conn.execute(
+            """
+            INSERT INTO credentials(id, site_id, name, username)
+            SELECT id, ?, name, username FROM credentials_legacy
+            """,
+            (default_site_id,),
+        )
+        model_expression = "model" if "model" in switch_columns else "''"
+        conn.execute(
+            f"""
+            INSERT INTO switches(
+                id, site_id, ip, name, last_credential_id, last_device_type, model
+            )
+            SELECT id, ?, ip, name, last_credential_id, last_device_type,
+                   {model_expression}
+            FROM switches_legacy
+            """,
+            (default_site_id,),
+        )
+        conn.execute("DROP TABLE switches_legacy")
+        conn.execute("DROP TABLE credentials_legacy")
+
+    # Sites ---------------------------------------------------------------
+    def list_sites(self) -> list[Site]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, name FROM sites ORDER BY id").fetchall()
+        return [Site(int(row["id"]), row["name"]) for row in rows]
+
+    def add_site(self, name: str) -> Site:
+        name = name.strip()
+        if not name:
+            raise ValueError("Site name is required.")
+        with self._connect() as conn:
+            cursor = conn.execute("INSERT INTO sites(name) VALUES(?)", (name,))
+            return Site(int(cursor.lastrowid), name)
+
+    def delete_site(self, site_id: int) -> None:
+        sites = self.list_sites()
+        if len(sites) <= 1:
+            raise ValueError("At least one site must remain.")
+
+        credentials = self.list_credentials(site_id)
+        with self._connect() as conn:
+            conn.execute("DELETE FROM sites WHERE id = ?", (site_id,))
+        for credential in credentials:
+            self.secrets.delete(credential.id, "password")
+            self.secrets.delete(credential.id, "secret")
+
+    def site_counts(self, site_id: int) -> tuple[int, int]:
+        with self._connect() as conn:
+            credentials = conn.execute(
+                "SELECT COUNT(*) FROM credentials WHERE site_id = ?", (site_id,)
+            ).fetchone()[0]
+            switches = conn.execute(
+                "SELECT COUNT(*) FROM switches WHERE site_id = ?", (site_id,)
+            ).fetchone()[0]
+        return int(credentials), int(switches)
+
+    def default_site_id(self) -> int:
+        sites = self.list_sites()
+        if not sites:
+            raise RuntimeError("No sites are configured.")
+        return sites[0].id
 
     # Credentials ---------------------------------------------------------
-    def list_credentials(self) -> list[Credential]:
+    def list_credentials(self, site_id: int | None = None) -> list[Credential]:
+        parameters: tuple[int, ...] = ()
+        where = ""
+        if site_id is not None:
+            where = "WHERE site_id = ?"
+            parameters = (site_id,)
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, name, username FROM credentials ORDER BY id"
+                f"SELECT id, name, username, site_id FROM credentials {where} ORDER BY id",
+                parameters,
             ).fetchall()
-        return [Credential(int(r["id"]), r["name"], r["username"]) for r in rows]
+        return [
+            Credential(int(r["id"]), r["name"], r["username"], int(r["site_id"]))
+            for r in rows
+        ]
 
     def add_credential(
-        self, name: str, username: str, password: str
+        self,
+        name: str,
+        username: str,
+        password: str,
+        site_id: int | None = None,
     ) -> Credential:
         name = name.strip() or username.strip()
         username = username.strip()
@@ -109,11 +267,12 @@ class Database:
             raise ValueError("Username is required.")
         if not password:
             raise ValueError("Password is required for a new credential.")
+        site_id = site_id or self.default_site_id()
 
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO credentials(name, username) VALUES(?, ?)",
-                (name, username),
+                "INSERT INTO credentials(site_id, name, username) VALUES(?, ?, ?)",
+                (site_id, name, username),
             )
             credential_id = int(cur.lastrowid)
 
@@ -124,7 +283,7 @@ class Database:
                 conn.execute("DELETE FROM credentials WHERE id = ?", (credential_id,))
             raise
 
-        return Credential(credential_id, name, username)
+        return Credential(credential_id, name, username, site_id)
 
     def delete_credential(self, credential_id: int) -> None:
         with self._connect() as conn:
@@ -137,16 +296,24 @@ class Database:
         return self.secrets.get(credential_id, "password")
 
     # Switches ------------------------------------------------------------
-    def list_switches(self) -> list[Switch]:
+    def list_switches(self, site_id: int | None = None) -> list[Switch]:
+        parameters: tuple[int, ...] = ()
+        where = ""
+        if site_id is not None:
+            where = "WHERE site_id = ?"
+            parameters = (site_id,)
         with self._connect() as conn:
             rows = conn.execute(
-                """
-                SELECT id, ip, name, last_credential_id, last_device_type, model
+                f"""
+                SELECT id, ip, name, last_credential_id, last_device_type, model,
+                       site_id
                 FROM switches
+                {where}
                 ORDER BY
                     CAST(substr(ip, 1, instr(ip, '.') - 1) AS INTEGER),
                     ip
-                """
+                """,
+                parameters,
             ).fetchall()
         # Numeric IPv4 sorting is done in Python; SQL order above is merely stable.
         items = [
@@ -161,18 +328,25 @@ class Database:
                 ),
                 last_device_type=r["last_device_type"],
                 model=r["model"] or "",
+                site_id=int(r["site_id"]),
             )
             for r in rows
         ]
         return sorted(items, key=lambda s: tuple(int(x) for x in s.ip.split(".")))
 
-    def add_switches(self, ips: list[str], name: str = "") -> int:
+    def add_switches(
+        self,
+        ips: list[str],
+        name: str = "",
+        site_id: int | None = None,
+    ) -> int:
+        site_id = site_id or self.default_site_id()
         added = 0
         with self._connect() as conn:
             for ip in ips:
                 cur = conn.execute(
-                    "INSERT OR IGNORE INTO switches(ip, name) VALUES(?, ?)",
-                    (ip, name if len(ips) == 1 else ""),
+                    "INSERT OR IGNORE INTO switches(site_id, ip, name) VALUES(?, ?, ?)",
+                    (site_id, ip, name if len(ips) == 1 else ""),
                 )
                 added += int(cur.rowcount > 0)
         return added

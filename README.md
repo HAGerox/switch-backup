@@ -16,6 +16,7 @@ to an online service.
 - Add a single switch or a range of IPv4 addresses
 - Automatically discover switch names and models
 - Save multiple sets of login details
+- Keep separate credentials and switch lists for each site
 - Remember which login worked for each switch
 - Back up several switches at once with clear progress and results
 - Save selected running configurations to startup configuration

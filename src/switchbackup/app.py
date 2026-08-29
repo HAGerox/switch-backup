@@ -6,10 +6,13 @@ from pathlib import Path
 
 import toga
 from rubicon.objc import at
+from toga.dialogs import Dialog
 from toga.sources import AccessorColumn, ListSource
 from toga.style import Pack
 from toga.style.pack import CENTER, COLUMN, ROW
+from toga_cocoa.dialogs import NSAlertDialog
 from toga_cocoa.libs import (
+    NSAlertStyle,
     NSBezelStyle,
     NSImage,
     NSImageScaleProportionallyDown,
@@ -63,12 +66,40 @@ class NativeListActionButton(toga.Button):
         return NativeListActionButtonImpl(interface=self)
 
 
+class NativeActionDialogImpl(NSAlertDialog):
+    """Native NSAlert with an action-specific primary button."""
+
+    def __init__(self, title: str, message: str, action_title: str):
+        self.action_title = action_title
+        super().__init__(
+            title=title,
+            message=message,
+            alert_style=NSAlertStyle.Informational,
+            completion_handler=self.bool_completion_handler,
+        )
+
+    def build_dialog(self):
+        action_button = self.native.addButtonWithTitle(self.action_title)
+        cancel_button = self.native.addButtonWithTitle("Cancel")
+        action_button.keyEquivalent = "\r"
+        cancel_button.keyEquivalent = "\x1b"
+
+
+class NativeActionDialog(Dialog[bool]):
+    def __init__(self, title: str, message: str, action_title: str):
+        self._impl = NativeActionDialogImpl(title, message, action_title)
+
+
 class SwitchBackupApp(toga.App):
     def startup(self):
         prepare_networking()
         self.db = Database()
         self.backup_manager = BackupManager(self.db)
-        self.status_by_ip: dict[str, str] = {}
+        self.sites = self.db.list_sites()
+        self.active_site_id = self.sites[0].id
+        self.status_by_switch_id: dict[int, str] = {}
+        self._refreshing_sites = False
+        self.site_popup: toga.Window | None = None
         self.credential_popup: toga.Window | None = None
         self.switch_popup: toga.Window | None = None
 
@@ -78,19 +109,200 @@ class SwitchBackupApp(toga.App):
             resizable=True,
         )
 
-        tabs = toga.OptionContainer(
+        self.tabs = toga.OptionContainer(
             content=[
                 ("Credentials", self._build_credentials_tab()),
                 ("Switches", self._build_switches_tab()),
-            ]
+            ],
+            style=Pack(flex=1),
         )
-        self.main_window.content = tabs
+        self.main_window.content = toga.Box(
+            children=[
+                self._build_site_bar(),
+                toga.Divider(),
+                self.tabs,
+            ],
+            style=Pack(direction=COLUMN),
+        )
+        self._refresh_sites(self.active_site_id)
         self._refresh_credentials()
         self._refresh_switches()
         self.main_window.show()
 
     async def on_running(self):
         await self._discover_undiscovered_switches()
+
+    # ------------------------------------------------------------------
+    # Site context
+    # ------------------------------------------------------------------
+    def _build_site_bar(self):
+        self.site_selector = toga.Selection(
+            items=[site.name for site in self.sites],
+            on_change=self._site_changed,
+            style=Pack(width=250),
+        )
+        self.add_site_button = self._list_action_button(
+            "NSAddTemplate", "Add site", self._show_site_popup
+        )
+        self.remove_site_button = self._list_action_button(
+            "NSRemoveTemplate",
+            "Remove current site",
+            self._remove_site,
+            enabled=len(self.sites) > 1,
+        )
+        return toga.Box(
+            children=[
+                toga.Label("Site", style=Pack(width=38)),
+                self.site_selector,
+                self._list_action_controls(
+                    self.add_site_button,
+                    self.remove_site_button,
+                ),
+                toga.Box(style=Pack(flex=1)),
+            ],
+            style=Pack(
+                direction=ROW,
+                align_items=CENTER,
+                margin=(10, 12),
+                gap=8,
+            ),
+        )
+
+    def _refresh_sites(self, selected_site_id: int | None = None):
+        self.sites = self.db.list_sites()
+        selected_site_id = selected_site_id or self.active_site_id
+        selected = next(
+            (site for site in self.sites if site.id == selected_site_id),
+            self.sites[0],
+        )
+        self.active_site_id = selected.id
+
+        self._refreshing_sites = True
+        try:
+            self.site_selector.items = [site.name for site in self.sites]
+            self.site_selector.value = selected.name
+        finally:
+            self._refreshing_sites = False
+        self.remove_site_button.enabled = len(self.sites) > 1
+
+    def _site_changed(self, widget, **kwargs):
+        if self._refreshing_sites or self.site_selector.value is None:
+            return
+        site = next(
+            (site for site in self.sites if site.name == self.site_selector.value),
+            None,
+        )
+        if site is None or site.id == self.active_site_id:
+            return
+        self.active_site_id = site.id
+        self.status_by_switch_id.clear()
+        self._refresh_credentials()
+        self._refresh_switches()
+
+    def _show_site_popup(self, widget, **kwargs):
+        if self.site_popup and not self.site_popup.closed:
+            return
+
+        self.new_site_name = toga.TextInput(
+            placeholder="For example: London Office",
+            on_change=self._site_form_changed,
+        )
+        self.site_error_label = toga.Label(
+            "",
+            style=Pack(color="#c42b1c", height=18),
+        )
+        cancel_button = toga.Button("Cancel", on_press=self._close_site_popup)
+        self.add_site_confirm_button = toga.Button(
+            "Add Site",
+            on_press=self._save_site,
+            enabled=False,
+        )
+        form = toga.Box(
+            children=[
+                self._field("Site name", self.new_site_name),
+                self.site_error_label,
+            ],
+            style=Pack(direction=COLUMN, margin=20, gap=10, flex=1),
+        )
+        footer = toga.Box(
+            children=[
+                toga.Box(style=Pack(flex=1)),
+                cancel_button,
+                self.add_site_confirm_button,
+            ],
+            style=Pack(direction=ROW, margin=20, gap=8),
+        )
+        self.site_popup = toga.Window(
+            title="Add Site",
+            size=(460, 165),
+            resizable=False,
+            closable=False,
+            minimizable=False,
+            content=toga.Box(
+                children=[form, footer],
+                style=Pack(direction=COLUMN),
+            ),
+        )
+        self._show_sheet(
+            self.site_popup,
+            first_responder=self.new_site_name,
+            default_button=self.add_site_confirm_button,
+            cancel_button=cancel_button,
+        )
+
+    def _site_form_changed(self, widget, **kwargs):
+        self.site_error_label.text = ""
+        self.add_site_confirm_button.enabled = bool(self.new_site_name.value.strip())
+
+    async def _save_site(self, widget, **kwargs):
+        try:
+            site = self.db.add_site(self.new_site_name.value)
+        except sqlite3.IntegrityError:
+            self.site_error_label.text = "A site with that name already exists."
+            return
+        except Exception as exc:
+            self.site_error_label.text = str(exc)
+            return
+
+        self._close_site_popup()
+        self.status_by_switch_id.clear()
+        self._refresh_sites(site.id)
+        self._refresh_credentials()
+        self._refresh_switches()
+
+    async def _remove_site(self, widget, **kwargs):
+        if len(self.sites) <= 1:
+            return
+        site = next(
+            (site for site in self.sites if site.id == self.active_site_id),
+            None,
+        )
+        if site is None:
+            return
+        credential_count, switch_count = self.db.site_counts(site.id)
+        confirmed = await self.main_window.dialog(
+            NativeActionDialog(
+                f'Remove "{site.name}"?',
+                "This will remove "
+                f"{credential_count} credential{'s' if credential_count != 1 else ''} "
+                f"and {switch_count} switch{'es' if switch_count != 1 else ''} "
+                "from Switch Backup.",
+                "Remove",
+            )
+        )
+        if not confirmed:
+            return
+
+        self.db.delete_site(site.id)
+        self.status_by_switch_id.clear()
+        self._refresh_sites()
+        self._refresh_credentials()
+        self._refresh_switches()
+
+    def _close_site_popup(self, widget=None, **kwargs):
+        if self.site_popup and not self.site_popup.closed:
+            self._close_sheet(self.site_popup)
+        self.site_popup = None
 
     # ------------------------------------------------------------------
     # Credentials tab
@@ -105,6 +317,15 @@ class SwitchBackupApp(toga.App):
             on_select=self._credential_selection_changed,
             style=Pack(flex=1),
         )
+        self.credential_empty_state = self._empty_state(
+            "Start by adding a credential",
+            "Switch Backup needs login details before it can discover or back up "
+            "switches. Passwords are stored in macOS Keychain.",
+            "Add Credential",
+            self._show_credential_popup,
+            "1. Add a credential   2. Add switches   3. Select switches to back up",
+        )
+        self.credential_content = toga.Box(style=Pack(flex=1))
 
         self.add_credential_button = self._list_action_button(
             "NSAddTemplate", "Add credential", self._show_credential_popup
@@ -119,8 +340,7 @@ class SwitchBackupApp(toga.App):
             self.add_credential_button,
             self.remove_credential_button,
         )
-
-        return toga.Box(
+        self.credential_list = toga.Box(
             children=[
                 self.credential_table,
                 toga.Box(
@@ -128,14 +348,24 @@ class SwitchBackupApp(toga.App):
                     style=Pack(direction=ROW, align_items=CENTER, height=28),
                 ),
             ],
+            style=Pack(direction=COLUMN, gap=0, flex=1),
+        )
+
+        return toga.Box(
+            children=[self.credential_content],
             style=Pack(direction=COLUMN, margin=12, gap=0),
         )
 
     def _refresh_credentials(self):
+        credentials = self.db.list_credentials(self.active_site_id)
         self.credential_table.data = [
             {"name": credential.name, "username": credential.username}
-            for credential in self.db.list_credentials()
+            for credential in credentials
         ]
+        self._show_content(
+            self.credential_content,
+            self.credential_list if credentials else self.credential_empty_state,
+        )
         self.remove_credential_button.enabled = False
 
     def _credential_selection_changed(self, widget, **kwargs):
@@ -145,35 +375,55 @@ class SwitchBackupApp(toga.App):
 
     def _show_credential_popup(self, widget, **kwargs):
         if self.credential_popup and not self.credential_popup.closed:
-            self.credential_popup.show()
             return
 
         self.new_credential_name = toga.TextInput(
-            placeholder="For example: Main administrator"
+            placeholder="For example: Main administrator",
+            on_change=self._credential_form_changed,
         )
-        self.new_credential_username = toga.TextInput(placeholder="Username")
-        self.new_credential_password = MaskedTextInput(placeholder="Password")
+        self.new_credential_username = toga.TextInput(
+            placeholder="Username",
+            on_change=self._credential_form_changed,
+        )
+        self.new_credential_password = MaskedTextInput(
+            placeholder="Password",
+            on_change=self._credential_form_changed,
+        )
+        self.credential_error_label = toga.Label(
+            "",
+            style=Pack(color="#c42b1c", height=18),
+        )
 
         form = toga.Box(
             children=[
                 self._field("Name (optional)", self.new_credential_name),
                 self._field("Username", self.new_credential_username),
                 self._field("Password", self.new_credential_password),
+                self.credential_error_label,
             ],
-            style=Pack(direction=COLUMN, margin=16, gap=12, flex=1),
+            style=Pack(direction=COLUMN, margin=20, gap=10, flex=1),
         )
 
         cancel_button = toga.Button("Cancel", on_press=self._close_credential_popup)
-        save_button = toga.Button("Add Credential", on_press=self._save_credential)
+        self.save_credential_button = toga.Button(
+            "Add Credential",
+            on_press=self._save_credential,
+            enabled=False,
+        )
         footer = toga.Box(
-            children=[toga.Box(style=Pack(flex=1)), cancel_button, save_button],
-            style=Pack(direction=ROW, margin=16, gap=8),
+            children=[
+                toga.Box(style=Pack(flex=1)),
+                cancel_button,
+                self.save_credential_button,
+            ],
+            style=Pack(direction=ROW, margin=20, gap=8),
         )
 
         self.credential_popup = toga.Window(
             title="Add Credential",
-            size=(460, 270),
+            size=(480, 235),
             resizable=False,
+            closable=False,
             minimizable=False,
             content=toga.Box(
                 children=[form, footer],
@@ -182,7 +432,19 @@ class SwitchBackupApp(toga.App):
         )
         self._disable_password_autofill(self.new_credential_username)
         self._disable_password_autofill(self.new_credential_password)
-        self.credential_popup.show()
+        self._show_sheet(
+            self.credential_popup,
+            first_responder=self.new_credential_name,
+            default_button=self.save_credential_button,
+            cancel_button=cancel_button,
+        )
+
+    def _credential_form_changed(self, widget, **kwargs):
+        self.credential_error_label.text = ""
+        self.save_credential_button.enabled = bool(
+            self.new_credential_username.value.strip()
+            and self.new_credential_password.value
+        )
 
     async def _save_credential(self, widget, **kwargs):
         try:
@@ -190,18 +452,20 @@ class SwitchBackupApp(toga.App):
                 self.new_credential_name.value,
                 self.new_credential_username.value,
                 self.new_credential_password.value,
+                self.active_site_id,
             )
         except sqlite3.IntegrityError:
-            await self._popup_error(
-                self.credential_popup, "A credential with that name already exists."
+            self.credential_error_label.text = (
+                "A credential with that name already exists."
             )
             return
         except Exception as exc:
-            await self._popup_error(self.credential_popup, str(exc))
+            self.credential_error_label.text = str(exc)
             return
 
         self._close_credential_popup()
         self._refresh_credentials()
+        self._refresh_switches()
         asyncio.create_task(self._discover_undiscovered_switches())
 
     async def _remove_credential(self, widget, **kwargs):
@@ -210,25 +474,31 @@ class SwitchBackupApp(toga.App):
             return
 
         confirmed = await self.main_window.dialog(
-            toga.ConfirmDialog(
+            NativeActionDialog(
                 "Remove credential?",
                 f'Remove "{row.name}" from Switch Backup?',
+                "Remove",
             )
         )
         if not confirmed:
             return
 
         credential = next(
-            (item for item in self.db.list_credentials() if item.name == row.name),
+            (
+                item
+                for item in self.db.list_credentials(self.active_site_id)
+                if item.name == row.name
+            ),
             None,
         )
         if credential:
             self.db.delete_credential(credential.id)
         self._refresh_credentials()
+        self._refresh_switches()
 
     def _close_credential_popup(self, widget=None, **kwargs):
         if self.credential_popup and not self.credential_popup.closed:
-            self.credential_popup.close()
+            self._close_sheet(self.credential_popup)
         self.credential_popup = None
 
     # ------------------------------------------------------------------
@@ -248,6 +518,21 @@ class SwitchBackupApp(toga.App):
             on_cell_edit=self._switch_cell_edited,
             style=Pack(flex=1),
         )
+        self.switch_no_credentials_state = self._empty_state(
+            "Add a credential first",
+            "A credential is required before switches can be discovered, backed up, "
+            "or saved.",
+            "Go to Credentials",
+            self._show_credentials_tab,
+        )
+        self.switch_empty_state = self._empty_state(
+            "Add your first switch",
+            "Add one IP address or an IP range. Reachable switches will be identified "
+            "automatically.",
+            "Add Switches",
+            self._show_switch_popup,
+        )
+        self.switch_content = toga.Box(style=Pack(flex=1))
 
         self.add_switch_button = self._list_action_button(
             "NSAddTemplate", "Add switches", self._show_switch_popup
@@ -299,21 +584,27 @@ class SwitchBackupApp(toga.App):
             children=[self.switch_actions],
             style=Pack(direction=COLUMN, gap=5),
         )
+        self.switch_list = toga.Box(
+            children=[self.switch_table, self.switch_footer],
+            style=Pack(direction=COLUMN, gap=0, flex=1),
+        )
 
         return toga.Box(
-            children=[self.switch_table, self.switch_footer],
+            children=[self.switch_content],
             style=Pack(direction=COLUMN, margin=12, gap=0),
         )
 
     def _refresh_switches(self):
+        switches = self.db.list_switches(self.active_site_id)
+        has_credentials = bool(self.db.list_credentials(self.active_site_id))
         rows = []
-        for switch in self.db.list_switches():
+        for switch in switches:
             rows.append(
                 {
                     "ip": switch.ip,
                     "name": switch.name or "—",
                     "model": switch.model or "—",
-                    "status": self.status_by_ip.get(switch.ip, ""),
+                    "status": self.status_by_switch_id.get(switch.id, ""),
                     "switch_id": switch.id,
                 }
             )
@@ -321,22 +612,39 @@ class SwitchBackupApp(toga.App):
             accessors=["ip", "name", "model", "status", "switch_id"],
             data=rows,
         )
+        if switches:
+            content = self.switch_list
+        elif has_credentials:
+            content = self.switch_empty_state
+        else:
+            content = self.switch_no_credentials_state
+        self._show_content(self.switch_content, content)
+        self.add_switch_button.enabled = has_credentials
         self.remove_switch_button.enabled = False
         self.save_selected_button.enabled = False
         self.backup_selected_button.enabled = False
 
     def _switch_selection_changed(self, widget, **kwargs):
         has_selection = bool(self.switch_table.selection)
+        can_connect = has_selection and bool(
+            self.db.list_credentials(self.active_site_id)
+        )
         self.remove_switch_button.enabled = has_selection
-        self.save_selected_button.enabled = has_selection
-        self.backup_selected_button.enabled = has_selection
+        self.save_selected_button.enabled = can_connect
+        self.backup_selected_button.enabled = can_connect
 
     def _show_switch_popup(self, widget, **kwargs):
         if self.switch_popup and not self.switch_popup.closed:
-            self.switch_popup.show()
             return
 
-        self.single_ip_input = toga.TextInput(placeholder="192.168.1.10")
+        if not self.db.list_credentials(self.active_site_id):
+            self._show_credentials_tab()
+            return
+
+        self.single_ip_input = toga.TextInput(
+            placeholder="192.168.1.10",
+            on_change=self._switch_form_changed,
+        )
         self.single_name_input = toga.TextInput(placeholder="Optional display name")
         single_form = toga.Box(
             children=[
@@ -346,8 +654,14 @@ class SwitchBackupApp(toga.App):
             style=Pack(direction=COLUMN, margin=16, gap=12),
         )
 
-        self.range_start_input = toga.TextInput(placeholder="192.168.1.10")
-        self.range_end_input = toga.TextInput(placeholder="192.168.1.30")
+        self.range_start_input = toga.TextInput(
+            placeholder="192.168.1.10",
+            on_change=self._switch_form_changed,
+        )
+        self.range_end_input = toga.TextInput(
+            placeholder="192.168.1.30",
+            on_change=self._switch_form_changed,
+        )
         range_form = toga.Box(
             children=[
                 self._field("First IP address", self.range_start_input),
@@ -361,27 +675,60 @@ class SwitchBackupApp(toga.App):
                 ("Single switch", single_form),
                 ("IP range", range_form),
             ],
+            on_select=self._switch_form_changed,
             style=Pack(flex=1),
         )
 
         cancel_button = toga.Button("Cancel", on_press=self._close_switch_popup)
-        add_button = toga.Button("Add", on_press=self._save_switches)
+        self.add_switch_confirm_button = toga.Button(
+            "Add",
+            on_press=self._save_switches,
+            enabled=False,
+        )
+        self.switch_error_label = toga.Label(
+            "",
+            style=Pack(color="#c42b1c", margin_left=20, height=18),
+        )
         footer = toga.Box(
-            children=[toga.Box(style=Pack(flex=1)), cancel_button, add_button],
-            style=Pack(direction=ROW, margin=16, gap=8),
+            children=[
+                toga.Box(style=Pack(flex=1)),
+                cancel_button,
+                self.add_switch_confirm_button,
+            ],
+            style=Pack(direction=ROW, margin=20, gap=8),
         )
 
         self.switch_popup = toga.Window(
             title="Add Switches",
-            size=(500, 330),
+            size=(540, 330),
             resizable=False,
+            closable=False,
             minimizable=False,
             content=toga.Box(
-                children=[self.switch_add_mode, footer],
+                children=[self.switch_add_mode, self.switch_error_label, footer],
                 style=Pack(direction=COLUMN),
             ),
         )
-        self.switch_popup.show()
+        self._show_sheet(
+            self.switch_popup,
+            first_responder=self.single_ip_input,
+            default_button=self.add_switch_confirm_button,
+            cancel_button=cancel_button,
+        )
+
+    def _switch_form_changed(self, widget, **kwargs):
+        self.switch_error_label.text = ""
+        current_tab = self.switch_add_mode.current_tab
+        if current_tab is None:
+            enabled = False
+        elif current_tab.text == "Single switch":
+            enabled = bool(self.single_ip_input.value.strip())
+        else:
+            enabled = bool(
+                self.range_start_input.value.strip()
+                and self.range_end_input.value.strip()
+            )
+        self.add_switch_confirm_button.enabled = enabled
 
     async def _save_switches(self, widget, **kwargs):
         try:
@@ -395,8 +742,10 @@ class SwitchBackupApp(toga.App):
                 )
                 name = ""
 
-            existing_ips = {switch.ip for switch in self.db.list_switches()}
-            added = self.db.add_switches(ips, name)
+            existing_ips = {
+                switch.ip for switch in self.db.list_switches(self.active_site_id)
+            }
+            added = self.db.add_switches(ips, name, self.active_site_id)
             if not added:
                 message = (
                     "That switch is already in the list."
@@ -405,7 +754,7 @@ class SwitchBackupApp(toga.App):
                 )
                 raise ValueError(message)
         except Exception as exc:
-            await self._popup_error(self.switch_popup, str(exc))
+            self.switch_error_label.text = str(exc)
             return
 
         self._close_switch_popup()
@@ -422,7 +771,11 @@ class SwitchBackupApp(toga.App):
 
     async def _save_switch_cell(self, switch_id: int, accessor: str, value: str):
         switch = next(
-            (item for item in self.db.list_switches() if item.id == switch_id),
+            (
+                item
+                for item in self.db.list_switches(self.active_site_id)
+                if item.id == switch_id
+            ),
             None,
         )
         if switch is None or accessor not in {"ip", "name"}:
@@ -451,7 +804,7 @@ class SwitchBackupApp(toga.App):
             return
 
         if ip_changed:
-            self.status_by_ip.pop(switch.ip, None)
+            self.status_by_switch_id.pop(switch.id, None)
         self._refresh_switches()
         if ip_changed:
             await self._discover_switches([new_ip])
@@ -463,9 +816,10 @@ class SwitchBackupApp(toga.App):
 
         count = len(switches)
         confirmed = await self.main_window.dialog(
-            toga.ConfirmDialog(
+            NativeActionDialog(
                 "Remove switches?",
                 f"Remove {count} selected switch{'es' if count != 1 else ''} from the list?",
+                "Remove",
             )
         )
         if not confirmed:
@@ -473,12 +827,12 @@ class SwitchBackupApp(toga.App):
 
         self.db.delete_switches([switch.id for switch in switches])
         for switch in switches:
-            self.status_by_ip.pop(switch.ip, None)
+            self.status_by_switch_id.pop(switch.id, None)
         self._refresh_switches()
 
     def _close_switch_popup(self, widget=None, **kwargs):
         if self.switch_popup and not self.switch_popup.closed:
-            self.switch_popup.close()
+            self._close_sheet(self.switch_popup)
         self.switch_popup = None
 
     def _selected_switches(self):
@@ -486,7 +840,7 @@ class SwitchBackupApp(toga.App):
         selected_ids = {row.switch_id for row in rows}
         return [
             switch
-            for switch in self.db.list_switches()
+            for switch in self.db.list_switches(self.active_site_id)
             if switch.id in selected_ids
         ]
 
@@ -503,11 +857,12 @@ class SwitchBackupApp(toga.App):
 
         count = len(switches)
         confirmed = await self.main_window.dialog(
-            toga.ConfirmDialog(
+            NativeActionDialog(
                 "Save running configurations?",
                 "Replace the startup configuration on "
                 f"{count} selected switch{'es' if count != 1 else ''} "
                 "with the current running configuration?",
+                "Save",
             )
         )
         if confirmed:
@@ -518,11 +873,13 @@ class SwitchBackupApp(toga.App):
             return
         selected_ips = set(ips)
         switches = [
-            switch for switch in self.db.list_switches() if switch.ip in selected_ips
+            switch
+            for switch in self.db.list_switches(self.active_site_id)
+            if switch.ip in selected_ips
         ]
-        credentials = self.db.list_credentials()
+        credentials = self.db.list_credentials(self.active_site_id)
         for switch in switches:
-            self.status_by_ip[switch.ip] = "Discovering…"
+            self.status_by_switch_id[switch.id] = "Discovering…"
         self._begin_progress("Discovering", len(switches))
         self._set_network_buttons_enabled(False)
         self._refresh_switches()
@@ -550,25 +907,25 @@ class SwitchBackupApp(toga.App):
             self._set_network_buttons_enabled(True)
 
         for result in results:
-            self.status_by_ip[result.ip] = (
+            self.status_by_switch_id[result.switch_id] = (
                 "Discovered" if result.ok else f"Discovery failed: {result.message}"
             )
         self._finish_progress("Discovery complete", len(results), len(switches))
         self._refresh_switches()
 
     async def _discover_undiscovered_switches(self):
-        if not self.db.list_credentials():
+        if not self.db.list_credentials(self.active_site_id):
             return
         switches = [
             switch
-            for switch in self.db.list_switches()
+            for switch in self.db.list_switches(self.active_site_id)
             if self._switch_needs_discovery(switch)
         ]
         if switches:
             await self._discover_switches([switch.ip for switch in switches])
 
     async def _run_backup(self, switches):
-        credentials = self.db.list_credentials()
+        credentials = self.db.list_credentials(self.active_site_id)
         if not credentials:
             await self._error("Add a credential before backing up switches.")
             return
@@ -583,7 +940,7 @@ class SwitchBackupApp(toga.App):
             selected_ids = {switch.id for switch in switches}
             switches = [
                 switch
-                for switch in self.db.list_switches()
+                for switch in self.db.list_switches(self.active_site_id)
                 if switch.id in selected_ids
             ]
 
@@ -591,7 +948,7 @@ class SwitchBackupApp(toga.App):
         self.save_selected_button.enabled = False
         self.backup_selected_button.enabled = False
         for switch in switches:
-            self.status_by_ip[switch.ip] = "Backing up…"
+            self.status_by_switch_id[switch.id] = "Backing up…"
         self._refresh_switches()
 
         self._begin_progress("Backing up", len(switches))
@@ -618,7 +975,7 @@ class SwitchBackupApp(toga.App):
             self._set_network_buttons_enabled(True)
 
         for result in results:
-            self.status_by_ip[result.ip] = (
+            self.status_by_switch_id[result.switch_id] = (
                 "Backed up" if result.ok else f"Failed: {result.message}"
             )
         self._refresh_switches()
@@ -639,7 +996,7 @@ class SwitchBackupApp(toga.App):
             await self._error("No switches were backed up successfully.")
 
     async def _run_save(self, switches):
-        credentials = self.db.list_credentials()
+        credentials = self.db.list_credentials(self.active_site_id)
         if not credentials:
             await self._error("Add a credential before saving switch configurations.")
             return
@@ -652,12 +1009,12 @@ class SwitchBackupApp(toga.App):
             selected_ids = {switch.id for switch in switches}
             switches = [
                 switch
-                for switch in self.db.list_switches()
+                for switch in self.db.list_switches(self.active_site_id)
                 if switch.id in selected_ids
             ]
 
         for switch in switches:
-            self.status_by_ip[switch.ip] = "Saving…"
+            self.status_by_switch_id[switch.id] = "Saving…"
         self._refresh_switches()
         self._begin_progress("Saving", len(switches))
         self._set_network_buttons_enabled(False)
@@ -682,7 +1039,7 @@ class SwitchBackupApp(toga.App):
             self._set_network_buttons_enabled(True)
 
         for result in results:
-            self.status_by_ip[result.ip] = (
+            self.status_by_switch_id[result.switch_id] = (
                 "Saved to startup" if result.ok else f"Save failed: {result.message}"
             )
         self._refresh_switches()
@@ -704,6 +1061,82 @@ class SwitchBackupApp(toga.App):
     # ------------------------------------------------------------------
     # Shared UI helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _empty_state(
+        title: str,
+        message: str,
+        action_title: str,
+        on_press,
+        detail: str = "",
+    ):
+        children = [
+            toga.Box(style=Pack(flex=1)),
+            toga.Label(
+                title,
+                style=Pack(font_size=16, text_align=CENTER, width=500),
+            ),
+            toga.Label(
+                message,
+                style=Pack(text_align=CENTER, width=500),
+            ),
+        ]
+        if detail:
+            children.append(
+                toga.Label(
+                    detail,
+                    style=Pack(font_size=10, text_align=CENTER, width=500),
+                )
+            )
+        children.extend(
+            [
+                toga.Button(
+                    action_title,
+                    on_press=on_press,
+                    style=Pack(width=160),
+                ),
+                toga.Box(style=Pack(flex=1)),
+            ]
+        )
+        return toga.Box(
+            children=children,
+            style=Pack(direction=COLUMN, align_items=CENTER, gap=10, flex=1),
+        )
+
+    @staticmethod
+    def _show_content(container: toga.Box, content):
+        if container.children == [content]:
+            return
+        container.clear()
+        container.add(content)
+
+    def _show_credentials_tab(self, widget=None, **kwargs):
+        self.tabs.current_tab = "Credentials"
+
+    def _show_sheet(
+        self,
+        popup: toga.Window,
+        *,
+        first_responder,
+        default_button: toga.Button,
+        cancel_button: toga.Button,
+    ):
+        sheet = popup._impl.native
+        default_native = default_button._impl.native
+        cancel_native = cancel_button._impl.native
+        default_native.keyEquivalent = "\r"
+        cancel_native.keyEquivalent = "\x1b"
+        sheet.setDefaultButtonCell_(default_native.cell)
+        self.main_window._impl.native.beginSheet_completionHandler_(sheet, None)
+        sheet.makeFirstResponder_(first_responder._impl.native)
+
+    @staticmethod
+    def _close_sheet(popup: toga.Window):
+        sheet = popup._impl.native
+        parent = sheet.sheetParent
+        if parent is not None:
+            parent.endSheet_(sheet)
+        popup.close()
+
     @staticmethod
     def _list_action_button(
         image_name: str,
@@ -754,7 +1187,12 @@ class SwitchBackupApp(toga.App):
             pass
 
     def _set_network_buttons_enabled(self, enabled: bool):
-        self.add_switch_button.enabled = enabled
+        self.site_selector.enabled = enabled
+        self.add_site_button.enabled = enabled
+        self.remove_site_button.enabled = enabled and len(self.sites) > 1
+        self.add_switch_button.enabled = enabled and bool(
+            self.db.list_credentials(self.active_site_id)
+        )
         if not enabled:
             self.remove_switch_button.enabled = False
             self.save_selected_button.enabled = False
@@ -793,7 +1231,7 @@ class SwitchBackupApp(toga.App):
     def _apply_discovery_progress(self, done, total, result):
         self.backup_progress.value = done
         self.progress_label.text = "Discovering"
-        self.status_by_ip[result.ip] = (
+        self.status_by_switch_id[result.switch_id] = (
             "Discovered" if result.ok else f"Discovery failed: {result.message}"
         )
         self._refresh_switches()
@@ -801,7 +1239,7 @@ class SwitchBackupApp(toga.App):
     def _apply_backup_progress(self, done, total, result):
         self.backup_progress.value = done
         self.progress_label.text = "Backing up"
-        self.status_by_ip[result.ip] = (
+        self.status_by_switch_id[result.switch_id] = (
             "Backed up" if result.ok else f"Failed: {result.message}"
         )
         self._refresh_switches()
@@ -809,14 +1247,10 @@ class SwitchBackupApp(toga.App):
     def _apply_save_progress(self, done, total, result):
         self.backup_progress.value = done
         self.progress_label.text = "Saving"
-        self.status_by_ip[result.ip] = (
+        self.status_by_switch_id[result.switch_id] = (
             "Saved to startup" if result.ok else f"Save failed: {result.message}"
         )
         self._refresh_switches()
-
-    async def _popup_error(self, popup: toga.Window | None, message: str):
-        window = popup if popup and not popup.closed else self.main_window
-        await window.dialog(toga.ErrorDialog("Switch Backup", message))
 
     async def _error(self, message: str):
         await self.main_window.dialog(toga.ErrorDialog("Switch Backup", message))

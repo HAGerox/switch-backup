@@ -4,10 +4,17 @@ from dataclasses import dataclass
 
 
 @dataclass(slots=True)
+class Site:
+    id: int
+    name: str
+
+
+@dataclass(slots=True)
 class Credential:
     id: int
     name: str
     username: str
+    site_id: int = 1
 
 
 @dataclass(slots=True)
@@ -18,6 +25,7 @@ class Switch:
     last_credential_id: int | None = None
     last_device_type: str | None = None
     model: str = ""
+    site_id: int = 1
 
 
 @dataclass(slots=True)
