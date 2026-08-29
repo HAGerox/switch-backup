@@ -109,8 +109,15 @@ class SiteActionMenuImpl(CocoaWidget):
         self.native.interface = self.interface
         self.native.impl = self
         self.native.autoenablesItems = False
-        self.native.bezelStyle = NSBezelStyle.Rounded
-        self.native.addItemWithTitle_(at("Manage"))
+        self.native.bordered = False
+        self.native.cell.arrowPosition = 0
+        self.native.addItemWithTitle_(at(""))
+        self.native.itemAtIndex_(0).image = (
+            NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                at("ellipsis.circle"),
+                at("Site actions"),
+            )
+        )
         self.native.addItemWithTitle_(at("New Site…"))
         self.native.addItemWithTitle_(at("Rename Site…"))
         self.native.menu.addItem_(NSMenuItem.separatorItem())
@@ -118,8 +125,8 @@ class SiteActionMenuImpl(CocoaWidget):
         self.native.itemAtIndex_(self.REMOVE_INDEX).setEnabled_(
             self.interface.remove_enabled
         )
-        self.native.toolTip = "Manage sites"
-        self.native.setAccessibilityLabel_("Manage sites")
+        self.native.toolTip = "Site actions"
+        self.native.setAccessibilityLabel_("Site actions")
         self.native.target = self.native
         self.native.action = SEL("onSelect:")
         self.add_constraints()
@@ -278,13 +285,16 @@ class SwitchBackupApp(toga.App):
         self.site_action_menu = SiteActionMenu(
             self,
             remove_enabled=len(self.sites) > 1,
-            style=Pack(width=82, height=24),
+            style=Pack(width=28, height=24),
+        )
+        site_controls = toga.Box(
+            children=[self.site_selector, self.site_action_menu],
+            style=Pack(direction=ROW, align_items=CENTER, gap=4),
         )
         return toga.Box(
             children=[
                 toga.Label("Site", style=Pack(width=38, margin_bottom=1)),
-                self.site_selector,
-                self.site_action_menu,
+                site_controls,
                 toga.Box(style=Pack(flex=1)),
             ],
             style=Pack(
@@ -794,38 +804,37 @@ class SwitchBackupApp(toga.App):
             placeholder="192.168.1.10",
             on_change=self._switch_form_changed,
         )
-        self.single_name_input = toga.TextInput(placeholder="Optional display name")
-        self.single_switch_fields = toga.Box(
-            children=[
-                self._field("IP address", self.single_ip_input),
-                self._field("Name (optional)", self.single_name_input),
-            ],
-            style=Pack(direction=COLUMN, gap=10),
-        )
-
-        self.range_start_input = toga.TextInput(
-            placeholder="192.168.1.10",
-            on_change=self._switch_form_changed,
-        )
+        self.range_start_input = self.single_ip_input
         self.range_end_input = toga.TextInput(
             placeholder="192.168.1.30",
             on_change=self._switch_form_changed,
         )
-        self.switch_range_fields = toga.Box(
-            children=[
-                self._field("First IP address", self.range_start_input),
-                self._field("Last IP address", self.range_end_input),
-            ],
-            style=Pack(direction=COLUMN, gap=10),
+        self.switch_primary_label = toga.Label(
+            "IP address",
+            style=Pack(width=120),
         )
+        self.switch_primary_row = toga.Box(
+            children=[self.switch_primary_label, self.single_ip_input],
+            style=Pack(direction=ROW, gap=10),
+        )
+        self.single_ip_input.style.flex = 1
+        self.switch_secondary_label = toga.Label(
+            "Last IP address",
+            style=Pack(width=120),
+        )
+        self.switch_secondary_row = toga.Box(
+            children=[self.switch_secondary_label, self.range_end_input],
+            style=Pack(direction=ROW, gap=10),
+        )
+        self.range_end_input.style.flex = 1
 
         self.switch_add_mode = SwitchModeControl(
             self._switch_mode_changed,
             style=Pack(width=260, height=24),
         )
-        self.switch_mode_fields = toga.Box(
-            children=[self.single_switch_fields],
-            style=Pack(direction=COLUMN),
+        self.switch_address_fields = toga.Box(
+            children=[self.switch_primary_row, self.switch_secondary_row],
+            style=Pack(direction=COLUMN, gap=10),
         )
         mode_row = toga.Box(
             children=[
@@ -849,7 +858,7 @@ class SwitchBackupApp(toga.App):
         form = toga.Box(
             children=[
                 mode_row,
-                self.switch_mode_fields,
+                self.switch_address_fields,
                 self.switch_error_label,
             ],
             style=Pack(direction=COLUMN, margin=20, gap=10, flex=1),
@@ -880,13 +889,16 @@ class SwitchBackupApp(toga.App):
             default_button=self.add_switch_confirm_button,
             cancel_button=cancel_button,
         )
+        self._switch_mode_changed(self.switch_add_mode)
 
     def _switch_mode_changed(self, widget, **kwargs):
         is_single = self.switch_add_mode.selected_index == 0
-        self._show_content(
-            self.switch_mode_fields,
-            self.single_switch_fields if is_single else self.switch_range_fields,
+        self.switch_primary_label._impl.native.stringValue = at(
+            "IP address" if is_single else "First IP address"
         )
+        self.switch_secondary_label._impl.native.setHidden_(is_single)
+        self.range_end_input._impl.native.setHidden_(is_single)
+        self.range_end_input.enabled = not is_single
         self._switch_form_changed(widget)
 
     def _switch_form_changed(self, widget, **kwargs):
@@ -904,7 +916,7 @@ class SwitchBackupApp(toga.App):
         try:
             if self.switch_add_mode.selected_index == 0:
                 ips = [parse_single_ip(self.single_ip_input.value)]
-                name = self.single_name_input.value.strip()
+                name = ""
             else:
                 ips = parse_ip_range(
                     self.range_start_input.value,
