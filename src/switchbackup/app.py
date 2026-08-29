@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import toga
-from rubicon.objc import at
+from rubicon.objc import SEL, at, objc_method, objc_property
 from toga.dialogs import Dialog
 from toga.sources import AccessorColumn, ListSource
 from toga.style import Pack
@@ -14,10 +14,16 @@ from toga_cocoa.dialogs import NSAlertDialog
 from toga_cocoa.libs import (
     NSAlertStyle,
     NSBezelStyle,
+    NSColor,
     NSImage,
     NSImageScaleProportionallyDown,
+    NSMakeRect,
+    NSMenuItem,
+    NSPopUpButton,
 )
 from toga_cocoa.widgets.button import Button as CocoaButton
+from toga_cocoa.widgets.base import Widget as CocoaWidget
+from travertino.size import at_least
 
 from .backup import BackupManager
 from .ip_utils import parse_ip_range, parse_single_ip
@@ -47,23 +53,111 @@ class NativeListActionButtonImpl(CocoaButton):
     def create(self):
         super().create()
         self.native.bordered = False
-        self.native.image = NSImage.imageNamed(at(self.interface.image_name))
-        self.native.imageScaling = NSImageScaleProportionallyDown
+        self._apply_symbol()
         self.native.toolTip = self.interface.help_text
         self.native.setAccessibilityLabel_(self.interface.help_text)
+
+    def set_text(self, text):
+        # Toga applies the initial button text after create(), clearing any image
+        # already assigned to the native button. Reapply the SF Symbol afterward.
+        super().set_text(text)
+        self._apply_symbol()
+
+    def _apply_symbol(self):
+        self.native.image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            at(self.interface.symbol_name),
+            at(self.interface.help_text),
+        )
+        self.native.imageScaling = NSImageScaleProportionallyDown
+        self.native.contentTintColor = NSColor.labelColor
 
     def _set_button_style(self):
         self.native.bezelStyle = NSBezelStyle.ShadowlessSquare
 
 
 class NativeListActionButton(toga.Button):
-    def __init__(self, image_name: str, help_text: str, **kwargs):
-        self.image_name = image_name
+    def __init__(self, symbol_name: str, help_text: str, **kwargs):
+        self.symbol_name = symbol_name
         self.help_text = help_text
         super().__init__("", **kwargs)
 
     def _create(self):
         return NativeListActionButtonImpl(interface=self)
+
+
+class TogaSiteActionMenu(NSPopUpButton):
+    interface = objc_property(object, weak=True)
+    impl = objc_property(object, weak=True)
+
+    @objc_method
+    def onSelect_(self, sender) -> None:
+        selected_index = int(self.indexOfSelectedItem)
+        self.selectItemAtIndex_(0)
+        self.interface.action_selected(selected_index)
+
+
+class SiteActionMenuImpl(CocoaWidget):
+    REMOVE_INDEX = 4
+
+    def create(self):
+        self.native = TogaSiteActionMenu.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(0, 0, 0, 0),
+            True,
+        )
+        self.native.interface = self.interface
+        self.native.impl = self
+        self.native.autoenablesItems = False
+        self.native.bordered = False
+        self.native.cell.arrowPosition = 0
+        self.native.addItemWithTitle_(at(""))
+        self.native.itemAtIndex_(0).image = (
+            NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                at("ellipsis.circle"),
+                at("Site actions"),
+            )
+        )
+        self.native.addItemWithTitle_(at("New Site…"))
+        self.native.addItemWithTitle_(at("Rename Site…"))
+        self.native.menu.addItem_(NSMenuItem.separatorItem())
+        self.native.addItemWithTitle_(at("Remove Site…"))
+        self.native.itemAtIndex_(self.REMOVE_INDEX).setEnabled_(
+            self.interface.remove_enabled
+        )
+        self.native.toolTip = "Site actions"
+        self.native.setAccessibilityLabel_("Site actions")
+        self.native.target = self.native
+        self.native.action = SEL("onSelect:")
+        self.add_constraints()
+
+    def rehint(self):
+        content_size = self.native.intrinsicContentSize()
+        self.interface.intrinsic.width = at_least(content_size.width)
+        self.interface.intrinsic.height = content_size.height
+
+    def set_remove_enabled(self, enabled: bool):
+        self.native.itemAtIndex_(self.REMOVE_INDEX).setEnabled_(enabled)
+
+
+class SiteActionMenu(toga.Widget):
+    def __init__(self, owner, *, remove_enabled: bool, **kwargs):
+        self.owner = owner
+        self.remove_enabled = remove_enabled
+        super().__init__(**kwargs)
+
+    def _create(self):
+        return SiteActionMenuImpl(interface=self)
+
+    def action_selected(self, index: int):
+        if index == 1:
+            self.owner._show_site_popup(self)
+        elif index == 2:
+            self.owner._show_rename_site_popup(self)
+        elif index == SiteActionMenuImpl.REMOVE_INDEX:
+            asyncio.create_task(self.owner._remove_site(self))
+
+    def set_remove_enabled(self, enabled: bool):
+        self.remove_enabled = enabled
+        self._impl.set_remove_enabled(enabled)
 
 
 class NativeActionDialogImpl(NSAlertDialog):
@@ -141,23 +235,16 @@ class SwitchBackupApp(toga.App):
             on_change=self._site_changed,
             style=Pack(width=250),
         )
-        self.add_site_button = self._list_action_button(
-            "NSAddTemplate", "Add site", self._show_site_popup
-        )
-        self.remove_site_button = self._list_action_button(
-            "NSRemoveTemplate",
-            "Remove current site",
-            self._remove_site,
-            enabled=len(self.sites) > 1,
+        self.site_action_menu = SiteActionMenu(
+            self,
+            remove_enabled=len(self.sites) > 1,
+            style=Pack(width=42, height=24),
         )
         return toga.Box(
             children=[
-                toga.Label("Site", style=Pack(width=38)),
+                toga.Label("Site", style=Pack(width=38, margin_top=2)),
                 self.site_selector,
-                self._list_action_controls(
-                    self.add_site_button,
-                    self.remove_site_button,
-                ),
+                self.site_action_menu,
                 toga.Box(style=Pack(flex=1)),
             ],
             style=Pack(
@@ -183,7 +270,7 @@ class SwitchBackupApp(toga.App):
             self.site_selector.value = selected.name
         finally:
             self._refreshing_sites = False
-        self.remove_site_button.enabled = len(self.sites) > 1
+        self.site_action_menu.set_remove_enabled(len(self.sites) > 1)
 
     def _site_changed(self, widget, **kwargs):
         if self._refreshing_sites or self.site_selector.value is None:
@@ -200,10 +287,26 @@ class SwitchBackupApp(toga.App):
         self._refresh_switches()
 
     def _show_site_popup(self, widget, **kwargs):
+        self._show_site_editor("add")
+
+    def _show_rename_site_popup(self, widget, **kwargs):
+        self._show_site_editor("rename")
+
+    def _show_site_editor(self, mode: str):
         if self.site_popup and not self.site_popup.closed:
             return
 
+        site = next(
+            (site for site in self.sites if site.id == self.active_site_id),
+            None,
+        )
+        if mode == "rename" and site is None:
+            return
+
+        self.site_editor_mode = mode
+        initial_name = site.name if site is not None and mode == "rename" else ""
         self.new_site_name = toga.TextInput(
+            value=initial_name,
             placeholder="For example: London Office",
             on_change=self._site_form_changed,
         )
@@ -213,9 +316,9 @@ class SwitchBackupApp(toga.App):
         )
         cancel_button = toga.Button("Cancel", on_press=self._close_site_popup)
         self.add_site_confirm_button = toga.Button(
-            "Add Site",
+            "Rename" if mode == "rename" else "Add Site",
             on_press=self._save_site,
-            enabled=False,
+            enabled=bool(initial_name),
         )
         form = toga.Box(
             children=[
@@ -233,7 +336,7 @@ class SwitchBackupApp(toga.App):
             style=Pack(direction=ROW, margin=20, gap=8),
         )
         self.site_popup = toga.Window(
-            title="Add Site",
+            title="Rename Site" if mode == "rename" else "Add Site",
             size=(460, 165),
             resizable=False,
             closable=False,
@@ -256,7 +359,13 @@ class SwitchBackupApp(toga.App):
 
     async def _save_site(self, widget, **kwargs):
         try:
-            site = self.db.add_site(self.new_site_name.value)
+            if self.site_editor_mode == "rename":
+                site = self.db.rename_site(
+                    self.active_site_id,
+                    self.new_site_name.value,
+                )
+            else:
+                site = self.db.add_site(self.new_site_name.value)
         except sqlite3.IntegrityError:
             self.site_error_label.text = "A site with that name already exists."
             return
@@ -328,10 +437,10 @@ class SwitchBackupApp(toga.App):
         self.credential_content = toga.Box(style=Pack(flex=1))
 
         self.add_credential_button = self._list_action_button(
-            "NSAddTemplate", "Add credential", self._show_credential_popup
+            "plus", "Add credential", self._show_credential_popup
         )
         self.remove_credential_button = self._list_action_button(
-            "NSRemoveTemplate",
+            "minus",
             "Remove selected credential",
             self._remove_credential,
             enabled=False,
@@ -535,10 +644,10 @@ class SwitchBackupApp(toga.App):
         self.switch_content = toga.Box(style=Pack(flex=1))
 
         self.add_switch_button = self._list_action_button(
-            "NSAddTemplate", "Add switches", self._show_switch_popup
+            "plus", "Add switches", self._show_switch_popup
         )
         self.remove_switch_button = self._list_action_button(
-            "NSRemoveTemplate",
+            "minus",
             "Remove selected switches",
             self._remove_switches,
             enabled=False,
@@ -1139,14 +1248,14 @@ class SwitchBackupApp(toga.App):
 
     @staticmethod
     def _list_action_button(
-        image_name: str,
+        symbol_name: str,
         help_text: str,
         on_press,
         *,
         enabled: bool = True,
     ):
         return NativeListActionButton(
-            image_name,
+            symbol_name,
             help_text,
             on_press=on_press,
             enabled=enabled,
@@ -1188,8 +1297,8 @@ class SwitchBackupApp(toga.App):
 
     def _set_network_buttons_enabled(self, enabled: bool):
         self.site_selector.enabled = enabled
-        self.add_site_button.enabled = enabled
-        self.remove_site_button.enabled = enabled and len(self.sites) > 1
+        self.site_action_menu.enabled = enabled
+        self.site_action_menu.set_remove_enabled(enabled and len(self.sites) > 1)
         self.add_switch_button.enabled = enabled and bool(
             self.db.list_credentials(self.active_site_id)
         )

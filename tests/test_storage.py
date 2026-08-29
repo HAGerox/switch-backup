@@ -50,6 +50,7 @@ def test_sites_isolate_credentials_and_switches(tmp_path: Path):
     db = Database(tmp_path / "db.sqlite3", secrets=secrets)
     default_site = db.list_sites()[0]
     second_site = db.add_site("London Office")
+    second_site = db.rename_site(second_site.id, "London Campus")
 
     first_credential = db.add_credential(
         "Main", "admin", "first-password", default_site.id

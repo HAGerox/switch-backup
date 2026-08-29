@@ -209,6 +209,19 @@ class Database:
             cursor = conn.execute("INSERT INTO sites(name) VALUES(?)", (name,))
             return Site(int(cursor.lastrowid), name)
 
+    def rename_site(self, site_id: int, name: str) -> Site:
+        name = name.strip()
+        if not name:
+            raise ValueError("Site name is required.")
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE sites SET name = ? WHERE id = ?",
+                (name, site_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("That site no longer exists.")
+        return Site(site_id, name)
+
     def delete_site(self, site_id: int) -> None:
         sites = self.list_sites()
         if len(sites) <= 1:
