@@ -1,0 +1,22 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.dist-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local environments and Briefcase output
+.venv/
+.briefcase/
+build/
+dist/
+logs/
+
+# Editors
+.idea/
+.vscode/
+*.swp
