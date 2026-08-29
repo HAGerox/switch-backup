@@ -74,9 +74,9 @@ For distribution to other Macs without Gatekeeper friction, use an Apple Develop
 
 ## Continuous integration and releases
 
-Pull requests and pushes to `main` run the test suite on macOS and scan Git history
-for secrets. Pushing a semantic version tag such as `v0.1.0` builds a universal macOS
-DMG, creates a SHA-256 checksum, and publishes both files to a GitHub Release.
+Pull requests and pushes to `main` run the test suite on macOS. Pushing a semantic
+version tag such as `v0.1.0` builds a universal macOS DMG, creates a SHA-256 checksum,
+and publishes both files to a GitHub Release.
 
 The workflow currently uses ad-hoc signing because no Apple Developer credentials are
 stored in the repository. Before distributing broadly, configure Developer ID signing
