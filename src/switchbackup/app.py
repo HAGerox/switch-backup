@@ -883,13 +883,13 @@ class SwitchBackupApp(toga.App):
                 style=Pack(direction=COLUMN),
             ),
         )
+        self._switch_mode_changed(self.switch_add_mode)
         self._show_sheet(
             self.switch_popup,
             first_responder=self.single_ip_input,
             default_button=self.add_switch_confirm_button,
             cancel_button=cancel_button,
         )
-        self._switch_mode_changed(self.switch_add_mode)
 
     def _switch_mode_changed(self, widget, **kwargs):
         is_single = self.switch_add_mode.selected_index == 0
