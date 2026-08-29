@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import toga
-from rubicon.objc import SEL, at, objc_method, objc_property
+from rubicon.objc import SEL, ObjCClass, at, objc_method, objc_property
 from toga.dialogs import Dialog
 from toga.sources import AccessorColumn, ListSource
 from toga.style import Pack
@@ -31,6 +31,8 @@ from .macos_fields import MaskedTextInput
 from .macos_table import NativeEditableTableImpl
 from .network import prepare_networking
 from .storage import Database
+
+NSSegmentedControl = ObjCClass("NSSegmentedControl")
 
 
 class SwitchTable(toga.Table):
@@ -107,15 +109,8 @@ class SiteActionMenuImpl(CocoaWidget):
         self.native.interface = self.interface
         self.native.impl = self
         self.native.autoenablesItems = False
-        self.native.bordered = False
-        self.native.cell.arrowPosition = 0
-        self.native.addItemWithTitle_(at(""))
-        self.native.itemAtIndex_(0).image = (
-            NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                at("ellipsis.circle"),
-                at("Site actions"),
-            )
-        )
+        self.native.bezelStyle = NSBezelStyle.Rounded
+        self.native.addItemWithTitle_(at("Manage"))
         self.native.addItemWithTitle_(at("New Site…"))
         self.native.addItemWithTitle_(at("Rename Site…"))
         self.native.menu.addItem_(NSMenuItem.separatorItem())
@@ -123,8 +118,8 @@ class SiteActionMenuImpl(CocoaWidget):
         self.native.itemAtIndex_(self.REMOVE_INDEX).setEnabled_(
             self.interface.remove_enabled
         )
-        self.native.toolTip = "Site actions"
-        self.native.setAccessibilityLabel_("Site actions")
+        self.native.toolTip = "Manage sites"
+        self.native.setAccessibilityLabel_("Manage sites")
         self.native.target = self.native
         self.native.action = SEL("onSelect:")
         self.add_constraints()
@@ -158,6 +153,51 @@ class SiteActionMenu(toga.Widget):
     def set_remove_enabled(self, enabled: bool):
         self.remove_enabled = enabled
         self._impl.set_remove_enabled(enabled)
+
+
+class TogaSwitchModeControl(NSSegmentedControl):
+    interface = objc_property(object, weak=True)
+    impl = objc_property(object, weak=True)
+
+    @objc_method
+    def onSelect_(self, sender) -> None:
+        self.interface.selection_changed(int(self.selectedSegment))
+
+
+class SwitchModeControlImpl(CocoaWidget):
+    def create(self):
+        self.native = TogaSwitchModeControl.alloc().init()
+        self.native.interface = self.interface
+        self.native.impl = self
+        self.native.segmentCount = 2
+        self.native.trackingMode = 0
+        self.native.segmentStyle = 1
+        self.native.setLabel_forSegment_(at("Single Switch"), 0)
+        self.native.setLabel_forSegment_(at("IP Range"), 1)
+        self.native.selectedSegment = self.interface.selected_index
+        self.native.target = self.native
+        self.native.action = SEL("onSelect:")
+        self.native.setAccessibilityLabel_("Choose how to add switches")
+        self.add_constraints()
+
+    def rehint(self):
+        content_size = self.native.intrinsicContentSize()
+        self.interface.intrinsic.width = at_least(content_size.width)
+        self.interface.intrinsic.height = content_size.height
+
+
+class SwitchModeControl(toga.Widget):
+    def __init__(self, on_change, **kwargs):
+        self.on_change = on_change
+        self.selected_index = 0
+        super().__init__(**kwargs)
+
+    def _create(self):
+        return SwitchModeControlImpl(interface=self)
+
+    def selection_changed(self, selected_index: int):
+        self.selected_index = selected_index
+        self.on_change(self)
 
 
 class NativeActionDialogImpl(NSAlertDialog):
@@ -238,11 +278,11 @@ class SwitchBackupApp(toga.App):
         self.site_action_menu = SiteActionMenu(
             self,
             remove_enabled=len(self.sites) > 1,
-            style=Pack(width=42, height=24),
+            style=Pack(width=82, height=24),
         )
         return toga.Box(
             children=[
-                toga.Label("Site", style=Pack(width=38, margin_top=2)),
+                toga.Label("Site", style=Pack(width=38, margin_bottom=1)),
                 self.site_selector,
                 self.site_action_menu,
                 toga.Box(style=Pack(flex=1)),
@@ -755,12 +795,12 @@ class SwitchBackupApp(toga.App):
             on_change=self._switch_form_changed,
         )
         self.single_name_input = toga.TextInput(placeholder="Optional display name")
-        single_form = toga.Box(
+        self.single_switch_fields = toga.Box(
             children=[
                 self._field("IP address", self.single_ip_input),
                 self._field("Name (optional)", self.single_name_input),
             ],
-            style=Pack(direction=COLUMN, margin=16, gap=12),
+            style=Pack(direction=COLUMN, gap=10),
         )
 
         self.range_start_input = toga.TextInput(
@@ -771,32 +811,48 @@ class SwitchBackupApp(toga.App):
             placeholder="192.168.1.30",
             on_change=self._switch_form_changed,
         )
-        range_form = toga.Box(
+        self.switch_range_fields = toga.Box(
             children=[
                 self._field("First IP address", self.range_start_input),
                 self._field("Last IP address", self.range_end_input),
             ],
-            style=Pack(direction=COLUMN, margin=16, gap=12),
+            style=Pack(direction=COLUMN, gap=10),
         )
 
-        self.switch_add_mode = toga.OptionContainer(
-            content=[
-                ("Single switch", single_form),
-                ("IP range", range_form),
+        self.switch_add_mode = SwitchModeControl(
+            self._switch_mode_changed,
+            style=Pack(width=260, height=24),
+        )
+        self.switch_mode_fields = toga.Box(
+            children=[self.single_switch_fields],
+            style=Pack(direction=COLUMN),
+        )
+        mode_row = toga.Box(
+            children=[
+                toga.Box(style=Pack(flex=1)),
+                self.switch_add_mode,
+                toga.Box(style=Pack(flex=1)),
             ],
-            on_select=self._switch_form_changed,
-            style=Pack(flex=1),
+            style=Pack(direction=ROW),
         )
 
         cancel_button = toga.Button("Cancel", on_press=self._close_switch_popup)
         self.add_switch_confirm_button = toga.Button(
-            "Add",
+            "Add Switches",
             on_press=self._save_switches,
             enabled=False,
         )
         self.switch_error_label = toga.Label(
             "",
-            style=Pack(color="#c42b1c", margin_left=20, height=18),
+            style=Pack(color="#c42b1c", height=18),
+        )
+        form = toga.Box(
+            children=[
+                mode_row,
+                self.switch_mode_fields,
+                self.switch_error_label,
+            ],
+            style=Pack(direction=COLUMN, margin=20, gap=10, flex=1),
         )
         footer = toga.Box(
             children=[
@@ -809,12 +865,12 @@ class SwitchBackupApp(toga.App):
 
         self.switch_popup = toga.Window(
             title="Add Switches",
-            size=(540, 330),
+            size=(480, 235),
             resizable=False,
             closable=False,
             minimizable=False,
             content=toga.Box(
-                children=[self.switch_add_mode, self.switch_error_label, footer],
+                children=[form, footer],
                 style=Pack(direction=COLUMN),
             ),
         )
@@ -825,12 +881,17 @@ class SwitchBackupApp(toga.App):
             cancel_button=cancel_button,
         )
 
+    def _switch_mode_changed(self, widget, **kwargs):
+        is_single = self.switch_add_mode.selected_index == 0
+        self._show_content(
+            self.switch_mode_fields,
+            self.single_switch_fields if is_single else self.switch_range_fields,
+        )
+        self._switch_form_changed(widget)
+
     def _switch_form_changed(self, widget, **kwargs):
         self.switch_error_label.text = ""
-        current_tab = self.switch_add_mode.current_tab
-        if current_tab is None:
-            enabled = False
-        elif current_tab.text == "Single switch":
+        if self.switch_add_mode.selected_index == 0:
             enabled = bool(self.single_ip_input.value.strip())
         else:
             enabled = bool(
@@ -841,7 +902,7 @@ class SwitchBackupApp(toga.App):
 
     async def _save_switches(self, widget, **kwargs):
         try:
-            if self.switch_add_mode.current_tab.text == "Single switch":
+            if self.switch_add_mode.selected_index == 0:
                 ips = [parse_single_ip(self.single_ip_input.value)]
                 name = self.single_name_input.value.strip()
             else:
