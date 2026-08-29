@@ -1,112 +1,81 @@
 # Switch Backup
 
-A deliberately small macOS utility for backing up Cisco switch running configurations.
+Switch Backup is a simple macOS app for saving Cisco switch configurations.
+Add your login details and switches, start a backup, and the app creates a ZIP
+file in your Downloads folder containing the running configuration from each
+switch.
+
+Everything runs directly from your Mac. Switch details stay on your computer,
+passwords are protected by macOS Keychain, and configurations are not uploaded
+to an online service.
 
 [Download the latest release](https://github.com/HAGerox/switch-backup/releases/latest)
 
-## What it does
+## Highlights
 
-- Two simple tabs: **Credentials** and **Switches**.
-- Stores credential metadata in a tiny local SQLite database.
-- Stores passwords in **macOS Keychain** using Python `keyring`.
-- Allows multiple credentials. A switch's last successful credential is tried first on later runs; otherwise credentials are tried in the order shown.
-- Automatically authenticates and discovers the hostname, platform driver, and model when switches are added.
-- Lets users edit a switch name or IP address by double-clicking its row.
-- Adds either one switch or an inclusive range using a focused popup with
-  separate first and last IP address fields.
-- Uses Cisco-specific Netmiko drivers to authenticate and identify supported switch families without entering configuration mode.
-- Uses Netmiko's platform-aware session preparation and reads the complete running
-  configuration (`show running-config detailed` on Catalyst 1200/1300-class switches).
-- Backs up up to three switches concurrently and shows per-switch progress.
-- Creates one ZIP in `~/Downloads` and does **not** retain a backup database.
-- Config files inside the ZIP are plain `.txt`, named like:
+- Add a single switch or a range of IPv4 addresses
+- Automatically discover switch names and models
+- Save multiple sets of login details
+- Remember which login worked for each switch
+- Back up several switches at once with clear progress and results
+- Create one easy-to-store ZIP file for every backup
+- Keep individual configurations as clearly named text files
 
-  `201 - Core Switch.txt`
+## Getting started
 
-  where `201` is the last octet of the switch IP and `Core Switch` is the entered name or the hostname discovered from the switch prompt.
+1. Download the latest DMG from the link above.
+2. Open it and drag **Switch Backup** into your Applications folder.
+3. Open the app and add at least one login under **Credentials**.
+4. Add your switches under **Switches**. The app will connect to them and fill
+   in their names and models where possible.
+5. Select the switches you want and start the backup.
 
-## Multiple credential behaviour
+The finished ZIP is saved in your Downloads folder with a name such as
+`Switch Backups - 2026-08-29 16-30-00.zip`. Inside it, each switch has a separate
+text file such as `201 - Core Switch.txt`.
 
-Unimus' documented discovery mode tries all configured credentials against a device and remembers whichever works. This app follows the same overall idea, but intentionally uses a deterministic order rather than random order:
+The current release is not notarized by Apple. If macOS blocks it the first
+time, Control-click the app, choose **Open**, and confirm that you want to open
+it.
 
-1. If this switch has previously backed up successfully, try that credential first.
-2. Then try the other credentials in the order they were added.
-3. Once a credential works, remember it for the next backup.
+## Privacy and safety
 
-This minimizes unnecessary failed authentication attempts on normal day-to-day use. Be careful about loading many incorrect passwords for the same username if your AAA policy has account lockout enabled.
+- Passwords are stored in macOS Keychain rather than in the app's database.
+- The app connects directly from your Mac to your switches over SSH.
+- Backups only read the running configuration. The app does not enter
+  configuration mode, save changes, or send configuration commands.
+- Backup ZIP files contain plain text configurations and are not encrypted, so
+  store and share them carefully.
 
-## Scope / intentional limitations of v0.1
+## Compatibility
 
-- **SSH only**, TCP port 22. No Telnet in v0.1.
-- Cisco-focused. Netmiko is multi-vendor, but the fallback drivers are deliberately Cisco switch families.
-- IPv4 only.
-- Username/password authentication only. SSH keys can be added later.
-- No schedules, config history, diffing, startup-config saving, or configuration push.
-- No host-key pinning UI yet; Netmiko is currently configured for compatibility-first SSH host-key handling.
-- Discovery only reads `show version` and `show inventory`. Backup only reads the
-  running configuration; it does not enter configuration mode or write anything to
-  switches.
+Switch Backup is built for Apple Silicon and Intel Macs. It currently supports
+Cisco switches reached over SSH on port 22 using IPv4 and a username and
+password.
 
-## Run it on a Mac in development mode
+Telnet, IPv6, SSH keys, scheduled backups, configuration history, comparisons,
+and configuration changes are not currently supported.
 
-You need Python 3.10+ installed. Homebrew Python is fine.
+## For developers
 
-From Terminal in this project folder:
+The app uses Python, Toga, Briefcase, and Netmiko. Python 3.10 or newer is
+required for local development.
+
+Run the app in development mode:
 
 ```bash
 ./run-dev-macos.sh
 ```
 
-The script creates a local `.venv`, installs Briefcase 0.4.4, and starts the app in Briefcase development mode.
-
-## Build a normal macOS app/DMG for your own Mac
+Run the tests and build a macOS DMG:
 
 ```bash
+python3 -m pip install "pytest>=8,<9"
+python3 -m pytest -q
 ./build-macos.sh
 ```
 
-This builds the macOS application with Briefcase, ad-hoc signs the application bundle,
-and places it inside an unsigned DMG under `dist/`.
+## License
 
-The packaged app includes its own Python runtime and Python dependencies, so the
-Mac running it does not need Python, Netmiko, or any other package installed.
-
-For distribution to other Macs without Gatekeeper friction, use an Apple Developer ID so Briefcase can sign and notarize the app rather than using `--adhoc-sign`.
-
-## Continuous integration and releases
-
-Pull requests and pushes to `main` run the test suite on macOS. Pushing a semantic
-version tag such as `v0.1.0` builds a universal macOS DMG and publishes it to a GitHub
-Release.
-
-The workflow currently ad-hoc signs the application bundle because no Apple Developer
-credentials are stored in the repository. As with Stem Separator, the outer DMG is
-created separately and left unsigned. Before distributing broadly, configure Developer
-ID signing and notarization in GitHub Actions so Gatekeeper accepts the downloaded
-application.
-
-Source and releases: <https://github.com/HAGerox/switch-backup>
-
-## Project layout
-
-```text
-src/switchbackup/
-  app.py          minimal Toga GUI
-  backup.py       concurrency + ZIP creation
-  network.py      Netmiko discovery and Cisco backup
-  storage.py      SQLite + Keychain persistence
-  ip_utils.py     single/range/CIDR parsing
-  filenames.py    requested TXT naming
-  models.py       small data models
-
-tests/
-  unit tests for ranges, naming, storage, credential order and ZIP output
-```
-
-## Why this architecture
-
-- **Netmiko** handles the CLI-specific details (prompt detection, terminal setup, paging and Cisco-family drivers) instead of reimplementing SSH screen-scraping.
-- **Toga** provides a native macOS Cocoa UI through `toga-cocoa`.
-- **Briefcase** produces a real `.app`/DMG rather than a Java JAR or background web service.
-- **keyring** maps to macOS Keychain for passwords.
-- **SQLite** persists only the tiny list of devices/credential metadata and the last successful discovery information.
+Copyright © 2026 Finn Stanley. Switch Backup is available under the
+[MIT License](LICENSE).
