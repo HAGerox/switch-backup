@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import errno
+import ipaddress
+import platform
 import re
 import socket
+import time
 
 from .models import BackupResult, Credential, DiscoveryResult, SaveResult, Switch
 from .storage import Database
@@ -15,6 +19,15 @@ CISCO_PROBE_DRIVERS = (
 
 _CONNECT_HANDLER = None
 ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-_][0-?]*[ -/]*[@-~])")
+LOCAL_NETWORK_RETRY_DELAYS = (0.5, 1.0, 2.0, 3.0)
+LOCAL_NETWORK_FAILURE_ERRNOS = {
+    errno.EACCES,
+    errno.EHOSTUNREACH,
+    errno.ENETDOWN,
+    errno.ENETUNREACH,
+    errno.EPERM,
+}
+IMMEDIATE_NETWORK_FAILURE_SECONDS = 0.25
 
 
 def prepare_networking() -> None:
@@ -483,11 +496,39 @@ class CiscoBackupClient:
 
     @staticmethod
     def _tcp_open(host: str, port: int, timeout: float = 1.5) -> bool:
-        try:
-            with socket.create_connection((host, port), timeout=timeout):
-                return True
-        except OSError:
+        retry_delays = iter(LOCAL_NETWORK_RETRY_DELAYS)
+        while True:
+            started = time.monotonic()
+            try:
+                with socket.create_connection((host, port), timeout=timeout):
+                    return True
+            except OSError as exc:
+                elapsed = time.monotonic() - started
+                if not CiscoBackupClient._should_retry_local_network(
+                    host, exc, elapsed
+                ):
+                    return False
+                try:
+                    delay = next(retry_delays)
+                except StopIteration:
+                    return False
+                time.sleep(delay)
+
+    @staticmethod
+    def _should_retry_local_network(
+        host: str, exc: OSError, elapsed: float
+    ) -> bool:
+        if platform.system() != "Darwin":
             return False
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        return (
+            (address.is_private or address.is_link_local)
+            and exc.errno in LOCAL_NETWORK_FAILURE_ERRNOS
+            and elapsed <= IMMEDIATE_NETWORK_FAILURE_SECONDS
+        )
 
     @staticmethod
     def _ordered_credentials(

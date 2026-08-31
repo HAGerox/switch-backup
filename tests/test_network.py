@@ -1,3 +1,5 @@
+import errno
+
 import switchbackup.network as network_module
 from switchbackup.models import Credential, Switch
 from switchbackup.network import CiscoBackupClient
@@ -121,6 +123,50 @@ def test_catalyst_1300_model_overrides_bad_cached_driver():
         model="C1300-24P-4X",
     )
     assert CiscoBackupClient._device_type_for_switch(switch) == "cisco_s300"
+
+
+def test_local_network_permission_failure_is_retried(monkeypatch):
+    attempts = []
+    sleeps = []
+
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def create_connection(address, timeout):
+        attempts.append((address, timeout))
+        if len(attempts) < 3:
+            raise OSError(errno.EHOSTUNREACH, "No route to host")
+        return FakeSocket()
+
+    times = iter((0.0, 0.01, 0.5, 0.51, 1.5))
+    monkeypatch.setattr(network_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(network_module.socket, "create_connection", create_connection)
+    monkeypatch.setattr(network_module.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(network_module.time, "sleep", sleeps.append)
+
+    assert CiscoBackupClient._tcp_open("192.168.1.201", 22)
+    assert len(attempts) == 3
+    assert sleeps == [0.5, 1.0]
+
+
+def test_normal_connection_refusal_is_not_retried(monkeypatch):
+    attempts = []
+
+    def create_connection(address, timeout):
+        attempts.append((address, timeout))
+        raise OSError(errno.ECONNREFUSED, "Connection refused")
+
+    times = iter((0.0, 0.01))
+    monkeypatch.setattr(network_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(network_module.socket, "create_connection", create_connection)
+    monkeypatch.setattr(network_module.time, "monotonic", lambda: next(times))
+
+    assert not CiscoBackupClient._tcp_open("192.168.1.201", 22)
+    assert len(attempts) == 1
 
 
 def test_paginated_startup_config_is_rejected():

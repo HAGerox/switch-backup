@@ -1,7 +1,7 @@
 [tool.briefcase]
 project_name = "Switch Backup"
 bundle = "com.switchbackup"
-version = "0.1.4"
+version = "0.1.5"
 url = "https://github.com/HAGerox/switch-backup"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -24,6 +24,7 @@ test_requires = ["pytest>=8,<9"]
 
 [tool.briefcase.app.switchbackup.macOS]
 universal_build = true
+info."NSLocalNetworkUsageDescription" = "Switch Backup needs access to your local network to discover and connect to switches over SSH."
 requires = [
     "toga-cocoa~=0.5.6",
     "std-nslog~=2.0.0",
