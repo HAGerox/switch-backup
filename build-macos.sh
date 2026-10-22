@@ -10,6 +10,20 @@ python scripts/check-python-security.py
 python -m pytest -q
 python scripts/prepare-python-support.py
 
+# Briefcase update keeps the generated project's original bundle metadata.
+# Recreate generated projects when the release version changes.
+python - <<'PYMETADATA'
+from pathlib import Path
+import plistlib
+import shutil
+import time
+import tomllib
+project = Path('build/switchbackup/macos/app')
+info = project / 'Switch Backup.app/Contents/Info.plist'
+version = tomllib.loads(Path('pyproject.toml').read_text())['tool']['briefcase']['version']
+if info.exists() and plistlib.loads(info.read_bytes()).get('CFBundleShortVersionString') != version:
+    shutil.move(project, Path('.build-support') / f'previous-project-{time.time_ns()}')
+PYMETADATA
 if [[ -d build/switchbackup/macos/app ]]; then
   briefcase update macOS app --update-support --update-requirements --no-input --log
 else
@@ -18,6 +32,15 @@ fi
 briefcase build macOS app --no-input --log
 app_path=$(find build/switchbackup/macos/app -maxdepth 1 -name '*.app' -print -quit)
 python scripts/check-python-security.py "$app_path"
+python - "$app_path" <<'PYVERSION'
+from pathlib import Path
+import plistlib
+import sys
+import tomllib
+expected = tomllib.loads(Path('pyproject.toml').read_text())['tool']['briefcase']['version']
+actual = plistlib.loads((Path(sys.argv[1]) / 'Contents/Info.plist').read_bytes())
+assert actual['CFBundleShortVersionString'] == expected, actual['CFBundleShortVersionString']
+PYVERSION
 briefcase package macOS app -p dmg --adhoc-sign --no-input --log
 
 app_path=$(find build/switchbackup/macos/app -maxdepth 1 -name '*.app' -print -quit)
