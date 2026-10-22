@@ -2,16 +2,23 @@
 set -euo pipefail
 cd "${0:A:h}"
 
-if [[ ! -d .venv ]]; then
-  python3 -m venv .venv
-fi
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install "briefcase==0.4.4"
+uv venv --python 3.14.9 --clear .build-venv
+uv pip install --python .build-venv/bin/python --upgrade \
+  "pip==26.2.2" "briefcase==0.4.4" "certifi>=2026.10.19" "gitpython>=3.2.1" "urllib3>=2.8.0" "pytest>=9.0.3,<10"
+source .build-venv/bin/activate
+python scripts/check-python-security.py
+python -m pytest -q
+python scripts/prepare-python-support.py
 
-briefcase create macOS app
-briefcase build macOS app
-briefcase package macOS app -p dmg --adhoc-sign
+if [[ -d build/switchbackup/macos/app ]]; then
+  briefcase update macOS app --update-support --update-requirements --no-input --log
+else
+  briefcase create macOS app --no-input --log
+fi
+briefcase build macOS app --no-input --log
+app_path=$(find build/switchbackup/macos/app -maxdepth 1 -name '*.app' -print -quit)
+python scripts/check-python-security.py "$app_path"
+briefcase package macOS app -p dmg --adhoc-sign --no-input --log
 
 app_path=$(find build/switchbackup/macos/app -maxdepth 1 -name '*.app' -print -quit)
 project_version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["tool"]["briefcase"]["version"])')

@@ -82,3 +82,5 @@ python3 -m pytest -q
 
 Copyright © 2026 Finn Stanley. Switch Backup is available under the
 [MIT License](LICENSE).
+
+Local macOS release builds use `zsh build-macos.sh` with uv installed. The build verifies the PSF-signed Python 3.14.9 installer and its SHA-256, then packages its universal framework with updated CA certificates.

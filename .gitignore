@@ -20,3 +20,7 @@ logs/
 .idea/
 .vscode/
 *.swp
+
+.build-venv/
+
+.build-support/
